@@ -1,5 +1,5 @@
 diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
-index 715c545..fcc4d17 100644
+index 715c545..7eee0a4 100644
 --- a/osfmk/console/serial_console.c
 +++ b/osfmk/console/serial_console.c
 @@ -47,6 +47,9 @@
@@ -29,6 +29,29 @@ index 715c545..fcc4d17 100644
  	if (disableConsoleOutput) {
  		return;
  	}
+@@ -526,6 +539,12 @@ void
+ console_write(char *str, int size)
+ {
+ 	if (disableConsoleOutput) {
++#if XNU_QCOM_USB_DEBUG
++		/* pdx203: the video console mutes itself in graphics mode, and this return came before _cnputs, so the USB log
++		 * went silent when the GUI started (2026-11-01, logs/usb-06 and usb-09). Muted output still goes to USB here;
++		 * unmuted output reaches the tee in _cnputs. */
++		(void)qcom_usb_debug_write(str, (size_t)size);
++#endif
+ 		return;
+ 	}
+ 
+@@ -611,6 +630,9 @@ void
+ console_write_unbuffered(char c)
+ {
+ 	if (disableConsoleOutput) {
++#if XNU_QCOM_USB_DEBUG
++		(void)qcom_usb_debug_write(&c, 1);
++#endif
+ 		return;
+ 	}
+ 
 diff --git a/osfmk/console/serial_general.c b/osfmk/console/serial_general.c
 index b1ca47a..ba8509e 100644
 --- a/osfmk/console/serial_general.c
