@@ -35,7 +35,10 @@ fi
 # Remove them first so earlier independent patches retain their idempotent checks.
 # The same holds for the boot-time GPU addon mount and the staged system apps copy (zzy), which edit the owner Data mount function
 # inside the systemos patch. Reverse newest first; the loop below re-applies them in name order.
-for LATE_PATCH in "$ROOT/patches/xnu/zzz-boot-progress.patch" "$ROOT/patches/xnu/zzy-staged-system-apps.patch" \
+# The QcomXnuUsbDebug hooks (zzzzzzzz-qcom-usb-debug-*) sit on top of boot-progress in pe_kprintf.c and the console files, so
+# they come off first or boot-progress cannot be reversed.
+for LATE_PATCH in "$ROOT/patches/xnu/zzzzzzzz-qcom-usb-debug-worker.patch" "$ROOT/patches/xnu/zzzzzzzz-qcom-usb-debug-console.patch" \
+    "$ROOT/patches/xnu/zzz-boot-progress.patch" "$ROOT/patches/xnu/zzy-staged-system-apps.patch" \
     "$ROOT/patches/xnu/zzy-native-gpu-addon-mount.patch"; do
   if git -C .cache/xnu-work apply --reverse --check "$LATE_PATCH" >/dev/null 2>&1; then
     git -C .cache/xnu-work apply --reverse "$LATE_PATCH"
@@ -326,7 +329,35 @@ if [ "$(cat "$SHENG_PMGR_STAMP" 2>/dev/null || echo 0)" != "$SHENG_PMGR" ]; then
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/bsd_init.o"
   printf '%s\n' "$SHENG_PMGR" > "$SHENG_PMGR_STAMP"
 fi
-EXTRA_MAKE_ARGS+=("bsd_init.o_CFLAGS_ADD=-DXNU_SHENG_PMGR=$SHENG_PMGR -DXNU_VERIFIED_ROOT_PROBE=$OWNER_ROOT_PROBE -DXNU_OWNER_ROOT_AUDIT=$OWNER_ROOT_AUDIT -DXNU_OWNER_ROOT_TRUST=$OWNER_ROOT_TRUST -DXNU_ADRENO_FIRMWARE_PROBE=$ADRENO_FIRMWARE_PROBE -DXNU_ADRENO_PM4_PROBE=$ADRENO_PM4_PROBE -DXNU_SMMU4K_PROBE=$SMMU4K_PROBE -DXNU_CONSTANT_UPLOADS_PROBE=$CONSTANT_UPLOADS_PROBE -DXNU_NATIVE_LEGACY_DISPLAY=${XNU_NATIVE_LEGACY_DISPLAY:-0} -DXNU_NATIVE_OFFLINE_GPU=$NATIVE_OFFLINE_GPU")
+# QcomXnuUsbDebug, the CDC-ACM kernel log over the DWC3. Its two patches guard every addition behind #if XNU_QCOM_USB_DEBUG in
+# six units (pe_kprintf, debug, printf, serial_console, serial_general, bsd_init); they get the define and the module's public
+# header. The device builds the archive and links it through XNU_EXTRA_LD_ARCHIVES. Make does not see a changed per-object
+# define, so a mode change removes the six objects.
+QCOM_USB_DEBUG=${XNU_QCOM_USB_DEBUG:-0}
+if [ "$QCOM_USB_DEBUG" != 0 ] && [ "$QCOM_USB_DEBUG" != 1 ]; then
+  echo 'XNU_QCOM_USB_DEBUG must be 0 or 1' >&2
+  exit 1
+fi
+QCOM_USB_FLAGS="-DXNU_QCOM_USB_DEBUG=$QCOM_USB_DEBUG"
+if [ "$QCOM_USB_DEBUG" = 1 ]; then
+  QCOM_USB_INCLUDE=$ROOT/drivers/QcomXnuUsbDebug/include
+  test -f "$QCOM_USB_INCLUDE/QcomXnuUsbDebug.h"
+  QCOM_USB_FLAGS="$QCOM_USB_FLAGS -I$QCOM_USB_INCLUDE"
+fi
+QCOM_USB_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.qcom-usb-debug-mode
+if [ "$(cat "$QCOM_USB_STAMP" 2>/dev/null || echo 0)" != "$QCOM_USB_DEBUG" ]; then
+  for QCOM_USB_OBJ in pexpert/DEVELOPMENT/pe_kprintf.o osfmk/DEVELOPMENT/debug.o osfmk/DEVELOPMENT/printf.o \
+      osfmk/DEVELOPMENT/serial_console.o osfmk/DEVELOPMENT/serial_general.o bsd/DEVELOPMENT/bsd_init.o; do
+    rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/$QCOM_USB_OBJ"
+  done
+  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
+  mkdir -p "$(dirname "$QCOM_USB_STAMP")"
+  printf '%s\n' "$QCOM_USB_DEBUG" > "$QCOM_USB_STAMP"
+fi
+for QCOM_USB_UNIT in pe_kprintf debug printf serial_console serial_general; do
+  EXTRA_MAKE_ARGS+=("$QCOM_USB_UNIT.o_CFLAGS_ADD=$QCOM_USB_FLAGS")
+done
+EXTRA_MAKE_ARGS+=("bsd_init.o_CFLAGS_ADD=-DXNU_SHENG_PMGR=$SHENG_PMGR -DXNU_VERIFIED_ROOT_PROBE=$OWNER_ROOT_PROBE -DXNU_OWNER_ROOT_AUDIT=$OWNER_ROOT_AUDIT -DXNU_OWNER_ROOT_TRUST=$OWNER_ROOT_TRUST -DXNU_ADRENO_FIRMWARE_PROBE=$ADRENO_FIRMWARE_PROBE -DXNU_ADRENO_PM4_PROBE=$ADRENO_PM4_PROBE -DXNU_SMMU4K_PROBE=$SMMU4K_PROBE -DXNU_CONSTANT_UPLOADS_PROBE=$CONSTANT_UPLOADS_PROBE -DXNU_NATIVE_LEGACY_DISPLAY=${XNU_NATIVE_LEGACY_DISPLAY:-0} -DXNU_NATIVE_OFFLINE_GPU=$NATIVE_OFFLINE_GPU $QCOM_USB_FLAGS")
 NATIVE_MOBILE_DISPLAY=${XNU_NATIVE_MOBILE_DISPLAY:-0}
 if [ "$NATIVE_MOBILE_DISPLAY" != 0 ] && [ "$NATIVE_MOBILE_DISPLAY" != 1 ]; then
   echo 'XNU_NATIVE_MOBILE_DISPLAY must be 0 or 1' >&2
