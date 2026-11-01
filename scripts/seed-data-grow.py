@@ -104,13 +104,18 @@ def main():
                 handle.seek(offset)
                 handle.write(data)
         attached = run('hdiutil', 'attach', '-imagekey', 'diskimage-class=CRawDiskImage', '-nomount', '-nobrowse', str(raw))
-        store = re.match(r'(/dev/disk\d+)', attached).group(1).split('/')[-1]
+        # every /dev/diskN the attach printed: macOS 27 lists the synthesized APFS container (diskM, then diskMs1) before the
+        # raw physical store, so the first line is no longer the store
+        devices = re.findall(r'^/dev/(disk\d+)\s', attached, re.M)
+        store = devices[0]
         try:
             listing = plistlib.loads(subprocess.check_output(['diskutil', 'apfs', 'list', '-plist']))
             container = None
             for entry in listing['Containers']:
-                if any(s['DeviceIdentifier'] == store for s in entry.get('PhysicalStores', [])):
+                stores = [s['DeviceIdentifier'] for s in entry.get('PhysicalStores', [])]
+                if any(s in devices for s in stores):
                     container = entry['ContainerReference']
+                    store = next(s for s in stores if s in devices)
             if not container:
                 sys.exit('No APFS container found on the attached seed')
             run('diskutil', 'apfs', 'resizeContainer', container, '0')
