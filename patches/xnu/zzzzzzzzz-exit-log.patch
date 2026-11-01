@@ -1,8 +1,8 @@
 diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
-index 760c339..1109dad 100644
+index 760c339..5fe71fc 100644
 --- a/bsd/kern/kern_exit.c
 +++ b/bsd/kern/kern_exit.c
-@@ -1910,6 +1910,22 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
+@@ -1910,6 +1910,23 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
  		corpse_source = vm_map_is_corpse_source(get_task_map(task));
  	}
  
@@ -11,7 +11,8 @@ index 760c339..1109dad 100644
 +	 * description when it has one (an uncaught exception's reason, a libsystem fault). With panic-on-crash off and no
 +	 * crash reports that survive a reboot, this is the record of which daemons crash or quit; the USB log carries it.
 +	 */
-+	{
++	/* xpcproxy execs the job it launches, so its own exits only double the log */
++	if (strncmp(p->p_name, "xpcproxy", sizeof("xpcproxy")) != 0) {
 +		os_reason_t exit_reason = p->p_exit_reason;
 +		char *exit_desc = exit_reason_get_string_desc(exit_reason);
 +		printf("EXITLOG %s[%d] %s %d ns %u code 0x%llx%s%.300s\n",

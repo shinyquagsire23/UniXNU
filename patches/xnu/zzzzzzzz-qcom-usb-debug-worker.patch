@@ -1,6 +1,8 @@
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index 1ea6fcd..d4195ab 100644
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
-@@ -108,6 +108,13 @@ <file scope>
+@@ -108,6 +108,13 @@
  #include <kern/zalloc.h>
  #include <kern/ux_handler.h>            /* for ux_handler_setup() */
  #include <kern/sched_hygiene.h>
@@ -14,12 +16,10 @@
  
  #if (DEVELOPMENT || DEBUG)
  #include <kern/debug.h>
-@@ -1287,13 +1294,225 @@ bsdinit_task
- 
- 	load_init_program(p);
+@@ -1291,11 +1298,228 @@ bsdinit_task(void)
  	lock_trace = 1;
-+}
-+
+ }
+ 
 +#if XNU_QCOM_USB_DEBUG
 +/* Exactly the Mach-private prototypes the worker needs, spelled here because
 + * this translation unit does not define MACH_KERNEL_PRIVATE (checked in
@@ -78,8 +78,8 @@
 +	__atomic_store_n(&qcom_usb_reboot_state, 4u, __ATOMIC_RELEASE);
 +	thread_bind(PROCESSOR_NULL);
 +	thread_terminate_self();
- }
- 
++}
++
 +static void
 +qcom_usb_start_reboot_once(void)
 +{
@@ -218,7 +218,12 @@
 +	    0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
 +		return;
 +	}
-+	result = kernel_thread_start(qcom_usb_worker, NULL, &thread);
++	/* pdx203: at the default kernel priority, bound to the boot CPU, the worker can be crowded out while the UI renders on
++	 * the CPU; the host then drops the device (2026-11-01, logs/usb-10: the CDC device left the bus at the Setup screen
++	 * while the system kept running). MAXPRI_KERNEL (95) puts it above every non-realtime thread; it sleeps 5 ms per
++	 * round, so it does not take the CPU from anyone. */
++	extern kern_return_t kernel_thread_start_priority(thread_continue_t, void *, integer_t, thread_t *);
++	result = kernel_thread_start_priority(qcom_usb_worker, NULL, 95, &thread);
 +	if (result == KERN_SUCCESS) {
 +		thread_deallocate(thread);
 +	} else {
