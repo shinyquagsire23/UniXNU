@@ -175,7 +175,7 @@
 +#endif
 +
 +#if defined(XNU_OWNER_DATA_MOUNT) && XNU_OWNER_DATA_MOUNT
-+#if !defined(XNU_OWNER_BOOT_MANIFEST) || !XNU_OWNER_BOOT_MANIFEST
++#if (!defined(XNU_OWNER_BOOT_MANIFEST) || !XNU_OWNER_BOOT_MANIFEST) && !(defined(XNU_BRINGUP_OWNER_CACHE) && XNU_BRINGUP_OWNER_CACHE)
 +#error Scratch Data mounting requires the authenticated original OS startup path
 +#endif
 +#if defined(XNU_NATIVE_RAM_BLOCK) && XNU_NATIVE_RAM_BLOCK
