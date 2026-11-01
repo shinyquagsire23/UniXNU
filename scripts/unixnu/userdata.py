@@ -12,13 +12,12 @@ Manifest (little endian): "SHNGROOT", u32 version=1, u32 count, u64 image_bytes,
 and at byte 4064 the SHA-256 of bytes 0..4063.
 
 The images come from the IPSW (a local file or a remote URL, see ipsw.py) and are checked against the pins of
-board.toml. The disk images are attached read-only without mounting (macOS hdiutil). Nothing is flashed: the
+board.toml. The disk images are converted to raw copies (macOS hdiutil convert), nothing is mounted. Nothing is flashed: the
 report prints the fastboot command, to be run by the user.
 """
 import hashlib
 import json
 import plistlib
-import re
 import struct
 import subprocess
 
@@ -39,15 +38,22 @@ def image_size(dmg):
     return plistlib.loads(info)['Size Information']['Total Bytes']
 
 
-def attach(dmg):
-    """Attach read-only without mounting; return the whole-disk device."""
-    out = subprocess.run(['hdiutil', 'attach', '-nomount', '-readonly', '-noverify', '-noautofsck', str(dmg)],
-                         capture_output=True, text=True, check=True).stdout
-    for line in out.splitlines():
-        match = re.match(r'(/dev/disk\d+)\s', line)
-        if match:
-            return match.group(1)
-    raise Error('could not find the attached disk device')
+def raw_copy(dmg, size):
+    """The disk image's exact raw bytes as a temporary file (hdiutil convert -format UDTO).
+
+    Reading an attached /dev/rdisk no longer works for this: macOS 27 attaches these images with 4096-byte device
+    blocks and rounds the device down (the 21H461 OS image: 6077580800 bytes in imageinfo, 6077546496 attached), so
+    the tail sectors, where the backup GPT lives, are not readable and the last read fails with EINVAL. The
+    converted file does not depend on the device block size and must come out at exactly `size` bytes."""
+    raw = dmg.with_name(dmg.stem + '.raw.cdr')
+    raw.unlink(missing_ok=True)
+    subprocess.run(['hdiutil', 'convert', str(dmg), '-quiet', '-format', 'UDTO', '-o', str(raw)],
+                   capture_output=True, text=True, check=True)
+    if not raw.is_file() or raw.stat().st_size != size:
+        got = raw.stat().st_size if raw.is_file() else None
+        raw.unlink(missing_ok=True)
+        raise Error(f'{dmg.name}: raw copy is {got} bytes, imageinfo says {size}')
+    return raw
 
 
 def build(ctx, dry_run=False):
@@ -55,7 +61,7 @@ def build(ctx, dry_run=False):
     spec = ctx.board.get('userdata')
     if not spec:
         raise Error('board.toml has no [userdata]')
-    tool('hdiutil', 'the disk images are attached with macOS hdiutil')
+    tool('hdiutil', 'the disk images are converted with macOS hdiutil')
     source = Ipsw(ctx)
     capacity = (spec['last_lba'] - spec['first_lba'] + 1) * spec.get('lba_bytes', 4096)
     if dry_run:
@@ -82,9 +88,8 @@ def build(ctx, dry_run=False):
     with image.open('wb') as target:
         target.truncate(total)
         for (name, offset, size), (_, dmg) in zip(layout, sources):
-            device = attach(dmg)
+            raw = raw_copy(dmg, size)
             try:
-                raw = device.replace('/dev/disk', '/dev/rdisk')
                 digest = hashlib.sha256()
                 target.seek(offset)
                 done = 0
@@ -98,7 +103,7 @@ def build(ctx, dry_run=False):
                         target.write(data)
                         done += want
             finally:
-                subprocess.run(['hdiutil', 'detach', device], capture_output=True)
+                raw.unlink(missing_ok=True)
             entries.append((name, offset, size, digest.digest()))
             log(f'userdata: {name} {size} bytes at {offset:#x} sha256 {digest.hexdigest()}')
         header = bytearray(4096)
