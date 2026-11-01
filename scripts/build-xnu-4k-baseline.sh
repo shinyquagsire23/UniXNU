@@ -348,12 +348,21 @@ if [ "$(cat "$OWNER_ROOT_STAMP" 2>/dev/null || echo 0:0:0:0:0:0)" != "$OWNER_ROO
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/bsd_init.o"
   printf '%s\n' "$OWNER_ROOT_PROBE:$OWNER_ROOT_AUDIT:$OWNER_ROOT_TRUST:$ADRENO_FIRMWARE_PROBE:$ADRENO_PM4_PROBE:$SMMU4K_PROBE:$CONSTANT_UPLOADS_PROBE:$NATIVE_LEGACY_DISPLAY:$NATIVE_OFFLINE_GPU" > "$OWNER_ROOT_STAMP"
 fi
+BRINGUP_OWNER_CACHE=${XNU_BRINGUP_OWNER_CACHE:-0}
+if [ "$BRINGUP_OWNER_CACHE" != 0 ] && [ "$BRINGUP_OWNER_CACHE" != 1 ]; then
+  echo 'XNU_BRINGUP_OWNER_CACHE must be 0 or 1' >&2
+  exit 1
+fi
 OWNER_CACHE_MOUNT=${XNU_OWNER_CACHE_MOUNT:-0}
 if [ "$OWNER_CACHE_MOUNT" != 0 ] && [ "$OWNER_CACHE_MOUNT" != 1 ]; then
   echo 'XNU_OWNER_CACHE_MOUNT must be 0 or 1' >&2
   exit 1
 fi
-if [ "$OWNER_CACHE_MOUNT" = 1 ] && [ "$OWNER_ROOT_TRUST" != 1 ]; then
+# From UniXNU-uke: an unverified UFS bring-up driver supplies native_verified_block_root_authorized and
+# native_verified_block_volume_device itself (only under native-ufs-allow-unverified=1), so it can mount the
+# published SystemOS volume without the owner policy bundle. A shipping build keeps this opt-in off and still
+# requires OWNER_ROOT_TRUST.
+if [ "$OWNER_CACHE_MOUNT" = 1 ] && [ "$OWNER_ROOT_TRUST" != 1 ] && [ "$BRINGUP_OWNER_CACHE" != 1 ]; then
   echo 'The offline SystemOS mount requires real independent owner root enforcement' >&2
   exit 1
 fi
@@ -387,7 +396,7 @@ if [ "$OWNER_DATA_MOUNT" != 0 ] && [ "$OWNER_DATA_MOUNT" != 1 ]; then
   echo 'XNU_OWNER_DATA_MOUNT must be 0 or 1' >&2
   exit 1
 fi
-if [ "$OWNER_DATA_MOUNT" = 1 ] && [ "$OWNER_BOOT_MANIFEST" != 1 ]; then
+if [ "$OWNER_DATA_MOUNT" = 1 ] && [ "$OWNER_BOOT_MANIFEST" != 1 ] && [ "$BRINGUP_OWNER_CACHE" != 1 ]; then
   echo 'Scratch Data requires authenticated original OS/owner metadata startup' >&2
   exit 1
 fi
@@ -455,7 +464,7 @@ if [ "$(cat "$NATIVE_AIR_STAMP" 2>/dev/null || echo 0)" != "$NATIVE_AIR_INIT" ];
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/kern_exec.o"
   printf '%s\n' "$NATIVE_AIR_INIT" > "$NATIVE_AIR_STAMP"
 fi
-EXTRA_MAKE_ARGS+=("kern_exec.o_CFLAGS_ADD=-DXNU_NATIVE_AIR_INIT=$NATIVE_AIR_INIT -DXNU_OWNER_CACHE_MOUNT=$OWNER_CACHE_MOUNT -DXNU_OWNER_CACHE_STARTUP=$OWNER_CACHE_STARTUP -DXNU_OWNER_BOOT_MANIFEST=$OWNER_BOOT_MANIFEST -DXNU_OWNER_DATA_MOUNT=$OWNER_DATA_MOUNT -DXNU_NATIVE_RAM_BLOCK=$NATIVE_RAM_BLOCK -DXNU_OWNER_CRYPTEX_FILES=$OWNER_CRYPTEX_FILES -DXNU_OWNER_UNION_SYSTEMOS=$OWNER_UNION_SYSTEMOS -include $OWNER_DATA_HEADER")
+EXTRA_MAKE_ARGS+=("kern_exec.o_CFLAGS_ADD=-DXNU_BRINGUP_OWNER_CACHE=$BRINGUP_OWNER_CACHE -DXNU_NATIVE_AIR_INIT=$NATIVE_AIR_INIT -DXNU_OWNER_CACHE_MOUNT=$OWNER_CACHE_MOUNT -DXNU_OWNER_CACHE_STARTUP=$OWNER_CACHE_STARTUP -DXNU_OWNER_BOOT_MANIFEST=$OWNER_BOOT_MANIFEST -DXNU_OWNER_DATA_MOUNT=$OWNER_DATA_MOUNT -DXNU_NATIVE_RAM_BLOCK=$NATIVE_RAM_BLOCK -DXNU_OWNER_CRYPTEX_FILES=$OWNER_CRYPTEX_FILES -DXNU_OWNER_UNION_SYSTEMOS=$OWNER_UNION_SYSTEMOS -include $OWNER_DATA_HEADER")
 OWNER_CACHE_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.owner-cache-mount-mode
 if [ "$(cat "$OWNER_CACHE_STAMP" 2>/dev/null || echo 0:0)" != "$OWNER_CACHE_MOUNT:$OWNER_CACHE_STARTUP" ]; then
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/kern_exec.o"
