@@ -1,6 +1,148 @@
+diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+index 715c545..fcc4d17 100644
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -47,6 +47,9 @@
+ #include <kern/cpu_data.h>
+ #include <kern/sched_prim.h>
+ #include <libkern/section_keywords.h>
++#if XNU_QCOM_USB_DEBUG
++#include <QcomXnuUsbDebug.h>
++#endif
+ 
+ #if __arm64__
+ #include <machine/machine_routines.h>
+@@ -280,6 +283,16 @@ _cnputc(char c, bool poll)
+ static inline void
+ _cnputs(char *c, int size, bool poll)
+ {
++#if XNU_QCOM_USB_DEBUG
++	/* Capture raw formatted bytes before the console can drop, truncate or
++	 * redirect them.  qcom_usb_debug_write is bounded, non-blocking and safe
++	 * in any context, including before the scheduler exists; it copies into a
++	 * CPU-only backlog and never prints, allocates or waits.
++	 */
++	if (size > 0 && c) {
++		(void)qcom_usb_debug_write(c, (size_t)size);
++	}
++#endif
+ 	if (disableConsoleOutput) {
+ 		return;
+ 	}
+diff --git a/osfmk/console/serial_general.c b/osfmk/console/serial_general.c
+index b1ca47a..ba8509e 100644
+--- a/osfmk/console/serial_general.c
++++ b/osfmk/console/serial_general.c
+@@ -169,7 +169,11 @@ console_printbuf_putc(int ch, void * arg)
+ 		 * if boot-arg 'drain_uart_sync=1' is set, then
+ 		 * drain all the buffer right now and append new ch
+ 		 */
+-		if (serialmode & SERIALMODE_SYNCDRAIN) {
++		/* USB logging must not inherit newline-free printbuf truncation. */
++#if !XNU_QCOM_USB_DEBUG
++		if (serialmode & SERIALMODE_SYNCDRAIN)
++#endif
++		{
+ 			info->str[info->pos] = '\0';
+ 			console_write(info->str, info->pos);
+ 			info->pos            = 0;
+diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
+index e9daeed..3c2bad2 100644
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -1126,6 +1126,10 @@ panic_with_thread_context(unsigned int reason, void *ctx, uint64_t debugger_opti
+ }
+ #endif /* defined (__x86_64__) */
+ 
++#if XNU_QCOM_USB_DEBUG
++#include <QcomXnuUsbDebug.h>
++#endif
++
+ #pragma clang diagnostic push
+ #pragma clang diagnostic ignored "-Wmissing-noreturn"
+ void
+@@ -1134,6 +1138,11 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+ {
+ #pragma clang diagnostic pop
+ 
++#if XNU_QCOM_USB_DEBUG
++	/* Diagnosis only: an inactive sink returns immediately. */
++	qcom_usb_debug_panic_prepare();
++#endif
++
+ #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
+ 	read_lbr();
+ #endif
+@@ -1239,6 +1248,13 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+ void
+ panic_spin_forever(void)
+ {
++#if XNU_QCOM_USB_DEBUG
++	/* Preallocated, synchronous, bounded; the last console bytes and the
++	 * end marker leave here even when no scheduler thread will run again.
++	 * The marker "QCOM PANIC END" appears only if both queues drained.
++	 */
++	qcom_usb_debug_panic_drain();
++#endif
+ 	for (;;) {
+ #if defined(__arm__) || defined(__arm64__)
+ 		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
+diff --git a/osfmk/kern/printf.c b/osfmk/kern/printf.c
+index aeac9d3..286558f 100644
+--- a/osfmk/kern/printf.c
++++ b/osfmk/kern/printf.c
+@@ -913,6 +913,21 @@ vprintf(const char *fmt, va_list ap)
+ 	return vprintf_internal(fmt, ap, __builtin_return_address(0));
+ }
+ 
++#if XNU_QCOM_USB_DEBUG
++#include <QcomXnuUsbDebug.h>
++/* True when the fan-out to PE_kputc below would reach _cnputs again, which is
++ * where this port tees.  Two values do: the USB sink itself, and the console
++ * fallback, whose body is a thin wrapper over _cnputs.  The second case is the
++ * state left behind when USB initialization is refused and PE_kputc keeps its
++ * pre-existing console value; the byte is already in the log once.
++ */
++static inline bool
++qcom_usb_pe_kputc_reenters_console(void)
++{
++	return PE_kputc == qcom_usb_debug_putc || PE_kputc == console_write_unbuffered;
++}
++#endif
++
+ void
+ consdebug_putc(char c)
+ {
+@@ -921,6 +936,13 @@ consdebug_putc(char c)
+ 	debug_putc(c);
+ 
+ 	if (!console_is_serial() && !disable_serial_output) {
++#if XNU_QCOM_USB_DEBUG
++		/* console_write_char -> console_write -> _cnputs already teed this
++		 * byte to USB.  Skip the fan-out only when it would re-enter the
++		 * console; serial and boot-progress consumers still get the byte.
++		 */
++		if (!qcom_usb_pe_kputc_reenters_console())
++#endif
+ 		PE_kputc(c);
+ 	}
+ }
+@@ -933,6 +955,10 @@ consdebug_putc_unbuffered(char c)
+ 	debug_putc(c);
+ 
+ 	if (!console_is_serial() && !disable_serial_output) {
++#if XNU_QCOM_USB_DEBUG
++		/* console_write_unbuffered is a thin wrapper over _cnputs. */
++		if (!qcom_usb_pe_kputc_reenters_console())
++#endif
+ 		PE_kputc(c);
+ 	}
+ }
+diff --git a/pexpert/arm/pe_kprintf.c b/pexpert/arm/pe_kprintf.c
+index 3c440ec..8e6e207 100644
 --- a/pexpert/arm/pe_kprintf.c
 +++ b/pexpert/arm/pe_kprintf.c
-@@ -13,11 +13,19 @@ <file scope>
+@@ -13,11 +13,19 @@
  #include <kern/simple_lock.h>
  #include <os/log_private.h>
  #include <libkern/section_keywords.h>
@@ -20,7 +162,7 @@
  // disable_serial_output disables kprintf() *and* unbuffered panic output.
  SECURITY_READ_ONLY_LATE(bool) disable_serial_output = true;
  // disable_kprintf_output only disables kprintf().
-@@ -31,6 +39,35 @@ <file scope>
+@@ -31,6 +39,38 @@ static SIMPLE_LOCK_DECLARE(kprintf_lock, 0);
  
  static void serial_putc_crlf(char c);
  
@@ -35,7 +177,10 @@
 +static bool
 +qcom_usb_pe_kputc_owns_usb_byte(void)
 +{
-+	return PE_kputc != console_write_unbuffered;
++	/* pdx203: PE_init_kprintf makes the USB sink itself PE_kputc once it is up, and then PE_kputc already puts the byte
++	 * on USB: teeing it as well sent every kprintf byte twice (with -enable_kprintf_spam and the console muted, the whole
++	 * log), and the stream stalled before launchd (2026-11-01, logs/usb-06). */
++	return PE_kputc != console_write_unbuffered && PE_kputc != qcom_usb_debug_putc;
 +}
 +
 +static void
@@ -56,7 +201,7 @@
  __startup_func
  static void
  PE_init_kprintf_config(void)
-@@ -51,6 +88,14 @@ PE_init_kprintf_config
+@@ -51,6 +91,14 @@ PE_init_kprintf_config(void)
  		disable_kprintf_output = false;
  	}
  #endif
@@ -71,7 +216,7 @@
  }
  // Do this early, so other code can depend on whether kprintf is enabled.
  STARTUP(TUNABLES, STARTUP_RANK_LAST, PE_init_kprintf_config);
-@@ -59,6 +104,22 @@ PE_init_kprintf
+@@ -59,6 +107,22 @@ __startup_func
  static void
  PE_init_kprintf(void)
  {
@@ -94,7 +239,7 @@
  	if (boot_progress_active()) { PE_kputc = boot_progress_putc; return; }
  	if (serial_init()) {
  		PE_kputc = serial_putc_crlf;
-@@ -70,6 +131,11 @@ PE_init_kprintf
+@@ -70,6 +134,11 @@ PE_init_kprintf(void)
  		 */
  		PE_kputc = console_write_unbuffered;
  	}
@@ -106,7 +251,7 @@
  }
  STARTUP(KPRINTF, STARTUP_RANK_FIRST, PE_init_kprintf);
  
-@@ -80,7 +146,7 @@ _kprintf
+@@ -80,7 +149,7 @@ _kprintf(const char *format, ...)
  	va_list         listp;
  
  	va_start(listp, format);
@@ -115,7 +260,7 @@
  	va_end(listp);
  }
  #define MP_DEBUG_KPRINTF(x...)  _kprintf(x)
-@@ -123,7 +189,7 @@ kprintf
+@@ -123,7 +192,7 @@ kprintf(const char *fmt, ...)
  			cpu_last_locked = cpu_number();
  		}
  
@@ -124,136 +269,3 @@
  
  		simple_unlock(&kprintf_lock);
  
---- a/osfmk/kern/debug.c
-+++ b/osfmk/kern/debug.c
-@@ -1125,6 +1125,10 @@ panic_with_thread_context
- 	va_end(panic_str_args);
- }
- #endif /* defined (__x86_64__) */
-+
-+#if XNU_QCOM_USB_DEBUG
-+#include <QcomXnuUsbDebug.h>
-+#endif
- 
- #pragma clang diagnostic push
- #pragma clang diagnostic ignored "-Wmissing-noreturn"
-@@ -1133,6 +1137,11 @@ panic_trap_to_debugger
-     uint64_t panic_options_mask, void *panic_data_ptr, unsigned long panic_caller)
- {
- #pragma clang diagnostic pop
-+
-+#if XNU_QCOM_USB_DEBUG
-+	/* Diagnosis only: an inactive sink returns immediately. */
-+	qcom_usb_debug_panic_prepare();
-+#endif
- 
- #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
- 	read_lbr();
-@@ -1239,6 +1248,13 @@ panic_spin_forever
- void
- panic_spin_forever(void)
- {
-+#if XNU_QCOM_USB_DEBUG
-+	/* Preallocated, synchronous, bounded; the last console bytes and the
-+	 * end marker leave here even when no scheduler thread will run again.
-+	 * The marker "QCOM PANIC END" appears only if both queues drained.
-+	 */
-+	qcom_usb_debug_panic_drain();
-+#endif
- 	for (;;) {
- #if defined(__arm__) || defined(__arm64__)
- 		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
---- a/osfmk/kern/printf.c
-+++ b/osfmk/kern/printf.c
-@@ -911,7 +911,22 @@ vprintf
- vprintf(const char *fmt, va_list ap)
- {
- 	return vprintf_internal(fmt, ap, __builtin_return_address(0));
-+}
-+
-+#if XNU_QCOM_USB_DEBUG
-+#include <QcomXnuUsbDebug.h>
-+/* True when the fan-out to PE_kputc below would reach _cnputs again, which is
-+ * where this port tees.  Two values do: the USB sink itself, and the console
-+ * fallback, whose body is a thin wrapper over _cnputs.  The second case is the
-+ * state left behind when USB initialization is refused and PE_kputc keeps its
-+ * pre-existing console value; the byte is already in the log once.
-+ */
-+static inline bool
-+qcom_usb_pe_kputc_reenters_console(void)
-+{
-+	return PE_kputc == qcom_usb_debug_putc || PE_kputc == console_write_unbuffered;
- }
-+#endif
- 
- void
- consdebug_putc(char c)
-@@ -921,6 +936,13 @@ consdebug_putc
- 	debug_putc(c);
- 
- 	if (!console_is_serial() && !disable_serial_output) {
-+#if XNU_QCOM_USB_DEBUG
-+		/* console_write_char -> console_write -> _cnputs already teed this
-+		 * byte to USB.  Skip the fan-out only when it would re-enter the
-+		 * console; serial and boot-progress consumers still get the byte.
-+		 */
-+		if (!qcom_usb_pe_kputc_reenters_console())
-+#endif
- 		PE_kputc(c);
- 	}
- }
-@@ -933,6 +955,10 @@ consdebug_putc_unbuffered
- 	debug_putc(c);
- 
- 	if (!console_is_serial() && !disable_serial_output) {
-+#if XNU_QCOM_USB_DEBUG
-+		/* console_write_unbuffered is a thin wrapper over _cnputs. */
-+		if (!qcom_usb_pe_kputc_reenters_console())
-+#endif
- 		PE_kputc(c);
- 	}
- }
---- a/osfmk/console/serial_console.c
-+++ b/osfmk/console/serial_console.c
-@@ -47,6 +47,9 @@ <file scope>
- #include <kern/cpu_data.h>
- #include <kern/sched_prim.h>
- #include <libkern/section_keywords.h>
-+#if XNU_QCOM_USB_DEBUG
-+#include <QcomXnuUsbDebug.h>
-+#endif
- 
- #if __arm64__
- #include <machine/machine_routines.h>
-@@ -280,6 +283,16 @@ _cnputs
- static inline void
- _cnputs(char *c, int size, bool poll)
- {
-+#if XNU_QCOM_USB_DEBUG
-+	/* Capture raw formatted bytes before the console can drop, truncate or
-+	 * redirect them.  qcom_usb_debug_write is bounded, non-blocking and safe
-+	 * in any context, including before the scheduler exists; it copies into a
-+	 * CPU-only backlog and never prints, allocates or waits.
-+	 */
-+	if (size > 0 && c) {
-+		(void)qcom_usb_debug_write(c, (size_t)size);
-+	}
-+#endif
- 	if (disableConsoleOutput) {
- 		return;
- 	}
---- a/osfmk/console/serial_general.c
-+++ b/osfmk/console/serial_general.c
-@@ -169,7 +169,11 @@ console_printbuf_putc
- 		 * if boot-arg 'drain_uart_sync=1' is set, then
- 		 * drain all the buffer right now and append new ch
- 		 */
--		if (serialmode & SERIALMODE_SYNCDRAIN) {
-+		/* USB logging must not inherit newline-free printbuf truncation. */
-+#if !XNU_QCOM_USB_DEBUG
-+		if (serialmode & SERIALMODE_SYNCDRAIN)
-+#endif
-+		{
- 			info->str[info->pos] = '\0';
- 			console_write(info->str, info->pos);
- 			info->pos            = 0;

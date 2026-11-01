@@ -36,8 +36,10 @@ fi
 # The same holds for the boot-time GPU addon mount and the staged system apps copy (zzy), which edit the owner Data mount function
 # inside the systemos patch. Reverse newest first; the loop below re-applies them in name order.
 # The QcomXnuUsbDebug hooks (zzzzzzzz-qcom-usb-debug-*) sit on top of boot-progress in pe_kprintf.c and the console files, so
-# they come off first or boot-progress cannot be reversed.
-for LATE_PATCH in "$ROOT/patches/xnu/zzzzzzzz-qcom-usb-debug-worker.patch" "$ROOT/patches/xnu/zzzzzzzz-qcom-usb-debug-console.patch" \
+# they come off first or boot-progress cannot be reversed. The launch-policy hook sits right after the CONFIG_MEMORYSTATUS
+# block of load_init_program, inside the context of offline-owner-z-air-init, which then reads as neither applied nor
+# applicable on a rebuild; it comes off before all of them.
+for LATE_PATCH in "$ROOT/patches/xnu/zzzzzzzzza-launch-policy.patch" "$ROOT/patches/xnu/zzzzzzzz-qcom-usb-debug-worker.patch" "$ROOT/patches/xnu/zzzzzzzz-qcom-usb-debug-console.patch" \
     "$ROOT/patches/xnu/zzz-boot-progress.patch" "$ROOT/patches/xnu/zzy-staged-system-apps.patch" \
     "$ROOT/patches/xnu/zzy-native-gpu-addon-mount.patch"; do
   if git -C .cache/xnu-work apply --reverse --check "$LATE_PATCH" >/dev/null 2>&1; then
