@@ -3,13 +3,16 @@
 trust modules byte for byte. Output: build/adreno-metal-plugin/owner-trust.bundle (ignored). The original modules are
 verified unchanged against build/original-static-system-trust; only the plugin's CDHash is added.
 
-  make-owner-trust-bundle.py [--app-trust FILE]
+  make-owner-trust-bundle.py [--app-trust FILE] [--extra-trust FILE ...]
 
 --app-trust adds a fourth, owner module with the CDHashes of the App cryptex's trust module (FILE: the IPSW's Cryptex1,AppTrustCache,
 an IM4P), for the App cryptex files the GPU addon carries (make-gpu-addon.py --cryptex-app). Apple's entries carry launch-constraint
 categories 1 and 2, which require the binary to lie on an authenticated (system or cryptex) volume; the addon's copies lie on owner Data,
 so AMFI killed webbookmarksd with "Launch Constraint Violation ... (Constraint not matched)" (pdx203 usb-52). The owner module keeps each
-hash and hash type and has category 0, as the plugin's own entries do."""
+hash and hash type and has category 0, as the plugin's own entries do.
+
+--extra-trust adds the CDHash of FILE (JSON {"cdhash": ...}, as the board's audio server plug-in build writes it) to the owner module;
+it may be given more than once."""
 import hashlib
 import json
 from pathlib import Path
@@ -21,15 +24,23 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from unixnu.ipsw import im4p_payload  # noqa: E402
 app_module = None
-if sys.argv[1:2] == ['--app-trust'] and len(sys.argv) == 3:
-    app_module = im4p_payload(Path(sys.argv[2]).read_bytes())
+args = sys.argv[1:]
+extra = []
+while '--extra-trust' in args:
+    at = args.index('--extra-trust')
+    if at + 1 >= len(args):
+        raise SystemExit(__doc__)
+    extra.append(bytes.fromhex(json.loads(Path(args[at + 1]).read_text())['cdhash']))
+    del args[at:at + 2]
+if args[:1] == ['--app-trust'] and len(args) == 2:
+    app_module = im4p_payload(Path(args[1]).read_bytes())
     if struct.unpack_from('<I', app_module)[0] != 2 or len(app_module) != 24 + 24 * struct.unpack_from('<I', app_module, 20)[0]:
         raise SystemExit('The App trust cache is not one version 2 trust module')
     app_entries = [app_module[24 + 24 * i:48 + 24 * i] for i in range(struct.unpack_from('<I', app_module, 20)[0])]
     app_identifier = uuid.uuid5(uuid.NAMESPACE_URL, 'org.blu-sharky.app-cryptex:' + ''.join(e[:20].hex() for e in app_entries))
     # cdhash[20], hash type, flags, launch-constraint category (0: none), reserved
     app_module = struct.pack('<I16sI', 2, app_identifier.bytes, len(app_entries)) + b''.join(e[:21] + bytes([e[21], 0, 0]) for e in app_entries)
-elif sys.argv[1:]:
+elif args:
     raise SystemExit(__doc__)
 original = (ROOT / 'build/original-static-system-trust/original-static-system.bundle').read_bytes()
 if hashlib.sha256(original).hexdigest() != '7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7':
@@ -40,7 +51,7 @@ offsets = struct.unpack_from('<2I', original, 4)
 originals = [original[offsets[0]:offsets[1]], original[offsets[1]:]]
 trust = json.loads((ROOT / 'build/adreno-metal-plugin/trust.json').read_text())
 # DarwinBoot's ValidTrustCaches (and the kernel's binary search) need the hashes of a module in strictly ascending order.
-hashes = sorted([bytes.fromhex(trust['cdhash']), bytes.fromhex(trust['daemon_cdhash']), bytes.fromhex(trust['turnip_cdhash'])])
+hashes = sorted([bytes.fromhex(trust['cdhash']), bytes.fromhex(trust['daemon_cdhash']), bytes.fromhex(trust['turnip_cdhash']), *extra])
 if len(set(hashes)) != len(hashes):
     raise SystemExit('Duplicate CDHash')
 cdhash = hashes[0]

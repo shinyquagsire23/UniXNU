@@ -1,0 +1,24 @@
+--- a/bsd/kern/kern_exec.c	2026-11-02 16:36:17
++++ b/bsd/kern/kern_exec.c	2026-11-02 16:36:17
+@@ -7214,6 +7214,8 @@
+ volatile int native_gpu_addon3_status = -1;
+ volatile int native_gpu_addon4_stage = 0;
+ volatile int native_gpu_addon4_status = -1;
++volatile int native_gpu_addon5_stage = 0;
++volatile int native_gpu_addon5_status = -1;
+ /* Executables reached through the App cryptex overlay (the bindfs mount on /System/Cryptexes, mount4 below): their code is checked
+  * against the boot trust cache like any other, but AMFI's launch constraints (on-authorized-authapfs-volume and the category it gives
+  * these Apple programs, c[8] even with an owner trust entry of category 0) can never match a file on owner Data, so every Safari service
+@@ -7576,6 +7578,12 @@
+ 	    "7570.iPadOS_17_Flat_Background-1024w-1366h@2x~ipad.ca/assets/J120.HEIC",
+ 	    "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/7570.iPadOS_17_Flat-1024w-1366h@2x~ipad.wallpaper/"
+ 	    "7570.iPadOS_17_Flat_Background-1024w-1366h@2x~ipad.ca/J120.jpg", &native_gpu_addon3_stage, &native_gpu_addon3_status);
++	/* The board's audio server plug-in (UniXNU-sheng's ShengAudio.driver) next to the system's: the audio server loads every driver
++	 * bundle in this directory. The addon's audio directory carries it; its CDHash is in the owner trust cache. */
++	static const char audio_source[] = "/private/var/ngpu/audio", audio_point[] = "/System/Library/Audio/Plug-Ins/HAL";
++	native_gpu_addon_mount(p, scratch, 0xc00, audio_source, sizeof(audio_source), audio_point, sizeof(audio_point),
++	    "/System/Library/Audio/Plug-Ins/HAL/BuiltinAudioPlugin.driver", "/System/Library/Audio/Plug-Ins/HAL/ShengAudio.driver/Info.plist",
++	    &native_gpu_addon5_stage, &native_gpu_addon5_status);
+ }
+ 
+ /* The deletable system apps (Weather, Notes, Calendar, ...) ship in the OS volume's /private/var/staged_system_apps. A restore copies
