@@ -2,7 +2,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 index a5ff474..4704203 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -7193,6 +7193,367 @@ uint64_t native_owner_data_seed_base, native_owner_data_seed_size;
+@@ -7193,6 +7193,385 @@ uint64_t native_owner_data_seed_base, native_owner_data_seed_size;
  uint8_t native_owner_data_seed_sha256[32];
  char native_owner_data_device_path[64];
  
@@ -21,6 +21,24 @@ index a5ff474..4704203 100644
 +volatile int native_gpu_addon3_status = -1;
 +volatile int native_gpu_addon4_stage = 0;
 +volatile int native_gpu_addon4_status = -1;
++/* Executables reached through the App cryptex overlay (the bindfs mount on /System/Cryptexes, mount4 below): their code is checked
++ * against the boot trust cache like any other, but AMFI's launch constraints (on-authorized-authapfs-volume and the category it gives
++ * these Apple programs, c[8] even with an owner trust entry of category 0) can never match a file on owner Data, so every Safari service
++ * was killed with "Launch Constraint Violation" (pdx203 usb-53). The exec path skips the launch-constraint hook for them alone. */
++volatile int native_gpu_addon_cryptex_execs = 0;
++static int
++native_gpu_addon_cryptex_vnode(vnode_t vp)
++{
++	if (native_gpu_addon4_stage < 3 || vp == NULLVP || vnode_mount(vp) == NULL) {
++		return 0;
++	}
++	struct vfsstatfs *sp = vfs_statfs(vnode_mount(vp));
++	if (strcmp(sp->f_fstypename, "bindfs") || strcmp(sp->f_mntonname, "/System/Cryptexes")) {
++		return 0;
++	}
++	native_gpu_addon_cryptex_execs++;
++	return 1;
++}
 +static void
 +native_gpu_addon_mount(proc_t p, user_addr_t scratch, user_addr_t offset, const char *source, size_t source_size,
 +    const char *point, size_t point_size, const char *visible, const char *own, volatile int *stage, volatile int *status)
@@ -370,7 +388,7 @@ index a5ff474..4704203 100644
  static int
  native_owner_data_prepare(proc_t p, user_addr_t scratch)
  {
-@@ -7251,6 +7612,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+@@ -7251,6 +7630,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
  	if (actual != device || (vfs_flags(data_mount) & MNT_RDONLY) ||
  	    strcmp(vfs_statfs(data_mount)->f_fstypename, "apfs")) error = EINVAL;
  	if (!error) native_owner_data_stage = 4;
@@ -378,6 +396,17 @@ index a5ff474..4704203 100644
  done:
  	if (data_root) vnode_put(data_root);
  	native_owner_data_status = error;
+@@ -7938,7 +8318,9 @@ exec_activate_image(struct image_params *imgp)
+ 
+ 	/* call the launch constraints hook */
+ 	os_reason_t launch_constraint_reason;
+-	if ((error = mac_proc_check_launch_constraints(p, imgp, &launch_constraint_reason)) != 0) {
++	if (native_gpu_addon_cryptex_vnode(imgp->ip_vp)) {
++		error = 0;
++	} else if ((error = mac_proc_check_launch_constraints(p, imgp, &launch_constraint_reason)) != 0) {
+ 		signature_failure_reason = launch_constraint_reason;
+ 		goto done;
+ 	}
 diff --git a/bsd/miscfs/bindfs/bind_vfsops.c b/bsd/miscfs/bindfs/bind_vfsops.c
 index 412f9ec..4466a64 100644
 --- a/bsd/miscfs/bindfs/bind_vfsops.c
