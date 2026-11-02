@@ -1,0 +1,89 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7885,6 +7885,77 @@ native_staged_apps_prepare(proc_t p, user_addr_t scratch, mount_t data_mount)
+ 	vnode_put(vp);
+ }
+ 
++/* Path diagnostic (pdx203 usb-58): with the App and OS cryptex files in the /System/Cryptexes overlay MobileSafari still found no
++ * SafariShared resources. After the Data, addon and staged-app mounts, prints one PATHDIAG row per path below, looked up once following
++ * symlinks (f) and once not (n): the error, the vnode type, the file system that answered (type, mounted on, mounted from) and a
++ * symlink's target, then one MOUNTDIAG row per mount with its flags. Decides which layer of the SystemOS union over / answers a path
++ * that the OS image links into /System/Cryptexes/OS. */
++static int
++native_path_diag_mount(mount_t mp, __unused void *arg)
++{
++	struct vfsstatfs *sfs = vfs_statfs(mp);
++	printf("MOUNTDIAG %s on %s from %s flags 0x%llx\n", sfs->f_fstypename, sfs->f_mntonname, sfs->f_mntfromname,
++	    (unsigned long long)vfs_flags(mp));
++	return VFS_RETURNED;
++}
++static void
++native_path_diag(void)
++{
++	static const char *const paths[] = {
++		"/System",
++		"/System/Library/PrivateFrameworks/SafariShared.framework",
++		"/System/Library/PrivateFrameworks/SafariShared.framework/Info.plist",
++		"/System/Library/PrivateFrameworks/SafariShared.framework/UserAgentQuirks.plist",
++		"/System/Cryptexes",
++		"/System/Cryptexes/OS",
++		"/System/Cryptexes/App",
++		"/System/Cryptexes/OS/System/Library/PrivateFrameworks/SafariShared.framework/UserAgentQuirks.plist",
++		"/private/var/ngpu/cx/OS/System/Library/PrivateFrameworks/SafariShared.framework/UserAgentQuirks.plist",
++		"/System/Cryptexes/App/usr/libexec/webbookmarksd",
++		"/System/Library/ExtensionKit/Extensions/WebContentExtension.appex/com.apple.WebKit.WebContent",
++		"/System/Library/CoreServices/SpringBoard.app/Info.plist",
++		"/System/Library/Frameworks/QuartzCore.framework/default.metallib",
++		"/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64",
++		"/usr/lib/libstdc++.6.dylib",
++		"/private/preboot",
++		"/Applications/MobileSafari.app/Info.plist",
++	};
++	vfs_context_t ctx = vfs_context_current();
++	char *link = kalloc_data(MAXPATHLEN, Z_WAITOK | Z_ZERO);
++	for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
++		for (int follow = 1; follow >= 0; --follow) {
++			vnode_t vp = NULLVP;
++			int error = vnode_lookup(paths[i], follow ? 0 : VNODE_LOOKUP_NOFOLLOW, &vp, ctx);
++			if (error || vp == NULLVP) {
++				printf("PATHDIAG %c err %d %s\n", follow ? 'f' : 'n', error, paths[i]);
++				continue;
++			}
++			mount_t mp = vnode_mount(vp);
++			struct vfsstatfs *sfs = mp ? vfs_statfs(mp) : NULL;
++			int linked = 0;
++			if (vnode_vtype(vp) == VLNK && link) {
++				uio_t uio = uio_create(1, 0, UIO_SYSSPACE, UIO_READ);
++				if (uio) {
++					uio_addiov(uio, CAST_USER_ADDR_T(link), MAXPATHLEN - 1);
++					if (!VNOP_READLINK(vp, uio, ctx)) {
++						link[MAXPATHLEN - 1 - uio_resid(uio)] = 0;
++						linked = 1;
++					}
++					uio_free(uio);
++				}
++			}
++			printf("PATHDIAG %c ok type %d fs %s on %s from %s%s%s %s\n", follow ? 'f' : 'n', (int)vnode_vtype(vp),
++			    sfs ? sfs->f_fstypename : "?", sfs ? sfs->f_mntonname : "?", sfs ? sfs->f_mntfromname : "?",
++			    linked ? " -> " : "", linked ? link : "", paths[i]);
++			vnode_put(vp);
++		}
++	}
++	if (link) {
++		kfree_data(link, MAXPATHLEN);
++	}
++	vfs_iterate(0, native_path_diag_mount, NULL);
++}
++
+ static int
+ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+ {
+@@ -7945,6 +8016,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+ 	if (!error) native_owner_data_stage = 4;
+ 	if (!error) native_gpu_addon_prepare(p, scratch);
+ 	if (!error) native_staged_apps_prepare(p, scratch, data_mount);
++	if (!error) native_path_diag();
+ done:
+ 	if (data_root) vnode_put(data_root);
+ 	native_owner_data_status = error;
