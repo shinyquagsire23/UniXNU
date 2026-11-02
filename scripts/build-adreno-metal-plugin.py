@@ -28,8 +28,9 @@ if not TURNIP.is_file():
 subprocess.run(['python3', ROOT / 'scripts/gen-turnip-smoke-shaders.py'], check=True)
 # Turnip's first submission, recorded on the host, for the plugin's prefix replay (build/turnip-smoke/TurnipReplay.h).
 subprocess.run(['python3', ROOT / 'scripts/gen-turnip-replay.py'], check=True)
-subprocess.run(['python3', ROOT / 'scripts/build-native-metal-bridge.py', '--target', 'ios'], check=True)
-BRIDGE = ROOT / 'build/native-metal-bridge/ios/libnative_metal_bridge.a'
+# The bridge of the pinned NativeMetal (its 20 translator patches and translator 624bab39, upstream e5f729d's build-adreno-metal-bridge.py).
+subprocess.run(['python3', ROOT / 'scripts/build-adreno-metal-bridge.py', '--target', 'ios'], check=True)
+BRIDGE = ROOT / 'build/adreno-metal-bridge/ios/libadreno_metal_bridge.a'
 pm4 = OUT / 'AdrenoPM4.o'
 subprocess.run([*base, '-std=c11', '-c', ROOT / 'kits/AdrenoPM4/AdrenoPM4.c', '-o', pm4], check=True)
 exe = bundle / 'NativeAdrenoMetal'

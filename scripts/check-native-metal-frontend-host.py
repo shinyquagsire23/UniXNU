@@ -18,12 +18,12 @@ QUARTZCORE = ROOT / '.cache/firmware/target-volumes/os-mount/System/Library/Fram
 loader = next((p for p in [os.environ.get('NMB_HOST_LOADER', ''), '/opt/homebrew/lib/libMoltenVK.dylib'] if p and Path(p).is_file()), None)
 if not loader:
     raise SystemExit('A host Vulkan driver is required (brew install molten-vk, or NMB_HOST_LOADER)')
-subprocess.run([sys.executable, ROOT / 'scripts/build-native-metal-bridge.py', '--target', 'host'], check=True)
+subprocess.run([sys.executable, ROOT / 'scripts/build-adreno-metal-bridge.py', '--target', 'host'], check=True)
 OUT.mkdir(parents=True, exist_ok=True)
 flags = ['-std=c++17', '-fobjc-arc', '-O1', '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-Wno-deprecated-declarations', '-I', KIT]
 test = OUT / 'frontend_host'
 subprocess.run(['xcrun', 'clang++', *flags, KIT / 'NativeBridgeMetalFrontend.mm', KIT / 'bridge/frontend_host.mm',
-                ROOT / 'build/native-metal-bridge/host/libnative_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
                 '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', test], check=True)
 sdk = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
 subprocess.run(['xcrun', 'clang++', '-target', 'arm64-apple-ios17.0', '-isysroot', sdk, *flags, '-c', KIT / 'NativeBridgeMetalFrontend.mm',
@@ -45,7 +45,7 @@ if QUARTZCORE.is_file():
 # A nil resource in a blit call fails the command buffer; it must not raise (an exception escaping the plugin's worker thread aborted SpringBoard).
 nilargs = OUT / 'nil_args_host'
 subprocess.run(['xcrun', 'clang++', *flags, KIT / 'NativeBridgeMetalFrontend.mm', KIT / 'bridge/nil_args_host.mm',
-                ROOT / 'build/native-metal-bridge/host/libnative_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
                 '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', nilargs], check=True)
 run = subprocess.run([str(nilargs), loader, str(cache)], capture_output=True, text=True, timeout=600)
 (OUT / 'nil_args_host.log').write_text(run.stdout + run.stderr)
@@ -55,7 +55,7 @@ print([l for l in run.stdout.splitlines() if l.startswith('PASS')][0])
 # Interleaved encoding must be attributed to its own command buffer, regardless of commit order.
 telemetry = OUT / 'telemetry_host'
 subprocess.run(['xcrun', 'clang++', *flags, '-Wno-unused-function', KIT / 'NativeBridgeMetalFrontend.mm', KIT / 'bridge/telemetry_host.mm',
-                ROOT / 'build/native-metal-bridge/host/libnative_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
                 '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', telemetry], check=True)
 run = subprocess.run([str(telemetry), loader, str(cache)], capture_output=True, text=True, timeout=60)
 (OUT / 'telemetry_host.log').write_text(run.stdout + run.stderr)
@@ -66,7 +66,7 @@ print([l for l in run.stdout.splitlines() if l.startswith('PASS')][0])
 # processes and initially empty caches to keep a producer's memo/disk cache out of the consumer.
 archive_test = OUT / 'archive_host'
 subprocess.run(['xcrun', 'clang++', *flags, '-Wno-unused-function', KIT / 'NativeBridgeMetalFrontend.mm', KIT / 'bridge/archive_host.mm',
-                ROOT / 'build/native-metal-bridge/host/libnative_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
                 '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', archive_test], check=True)
 archive_log = ''
 with tempfile.TemporaryDirectory(prefix='render-archive-', dir=OUT) as temporary:
@@ -82,7 +82,7 @@ with tempfile.TemporaryDirectory(prefix='render-archive-', dir=OUT) as temporary
 # Compute creation must keep options and the same descriptor used for archive population.
 compute_archive = OUT / 'compute_archive_host'
 subprocess.run(['xcrun', 'clang++', *flags, KIT / 'NativeBridgeMetalFrontend.mm', KIT / 'bridge/compute_archive_host.mm',
-                ROOT / 'build/native-metal-bridge/host/libnative_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
                 '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', compute_archive], check=True)
 archive_log = ''
 with tempfile.TemporaryDirectory(prefix='compute-archive-', dir=OUT) as temporary:
@@ -99,7 +99,7 @@ with tempfile.TemporaryDirectory(prefix='compute-archive-', dir=OUT) as temporar
 # makes the old waitUntilScheduled -> waitUntilCompleted alias fail deterministically, with bounded waits.
 scheduled = OUT / 'scheduled_host'
 subprocess.run(['xcrun', 'clang++', *flags, KIT / 'NativeBridgeMetalFrontend.mm', KIT / 'bridge/scheduled_host.mm',
-                ROOT / 'build/native-metal-bridge/host/libnative_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
                 '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', scheduled], check=True)
 run = subprocess.run([str(scheduled), loader, str(cache)], capture_output=True, text=True, timeout=30)
 (OUT / 'scheduled_host.log').write_text(run.stdout + run.stderr)
@@ -108,7 +108,7 @@ if run.returncode or not any(l.startswith('PASS') for l in run.stdout.splitlines
 print([l for l in run.stdout.splitlines() if l.startswith('PASS')][0])
 resource_wait = OUT / 'resource_wait_host'
 subprocess.run(['xcrun', 'clang++', *flags, KIT / 'NativeBridgeMetalFrontend.mm', KIT / 'bridge/resource_wait_host.mm',
-                ROOT / 'build/native-metal-bridge/host/libnative_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
                 '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', resource_wait], check=True)
 run = subprocess.run([str(resource_wait), loader, str(cache)], capture_output=True, text=True, timeout=60)
 (OUT / 'resource_wait_host.log').write_text(run.stdout + run.stderr)
@@ -119,7 +119,7 @@ print([l for l in run.stdout.splitlines() if l.startswith('PASS')][0])
 # then release on completion/refusal/discard even if the command is retained.
 resource_lifetime = OUT / 'resource_lifetime_host'
 subprocess.run(['xcrun', 'clang++', *flags, KIT / 'NativeBridgeMetalFrontend.mm', KIT / 'bridge/resource_lifetime_host.mm',
-                ROOT / 'build/native-metal-bridge/host/libnative_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
                 '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', resource_lifetime], check=True)
 run = subprocess.run([str(resource_lifetime), loader, str(cache)], capture_output=True, text=True, timeout=30)
 (OUT / 'resource_lifetime_host.log').write_text(run.stdout + run.stderr)
@@ -130,7 +130,7 @@ print([l for l in run.stdout.splitlines() if l.startswith('PASS')][0])
 # range in one phase. The instrument forwards every real cache operation.
 surface_flush = OUT / 'surface_flush_host'
 subprocess.run(['xcrun', 'clang++', *flags, KIT / 'NativeBridgeMetalFrontend.mm', KIT / 'bridge/surface_flush_host.mm',
-                ROOT / 'build/native-metal-bridge/host/libnative_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
                 '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', surface_flush], check=True)
 run = subprocess.run([str(surface_flush), loader, str(cache)], capture_output=True, text=True, timeout=30)
 (OUT / 'surface_flush_host.log').write_text(run.stdout + run.stderr)
@@ -146,7 +146,7 @@ subprocess.run(['xcrun', 'clang++', *flags, '-Dnmb_buffer_new_no_copy=tracked_su
                 '-o', surface_import_object], check=True)
 surface_import = OUT / 'surface_import_host'
 subprocess.run(['xcrun', 'clang++', *flags, surface_import_object, KIT / 'bridge/surface_import_host.mm',
-                ROOT / 'build/native-metal-bridge/host/libnative_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
                 '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', surface_import], check=True)
 count_loader = OUT / 'libImportCountLoader.dylib'
 subprocess.run(['xcrun', 'clang++', '-std=c++17', '-O1', '-Wall', '-Wextra', '-Werror', '-dynamiclib',
@@ -159,7 +159,7 @@ if run.returncode or not any(l.startswith('PASS') for l in run.stdout.splitlines
 print([l for l in run.stdout.splitlines() if l.startswith('PASS')][0])
 no_copy_import = OUT / 'no_copy_import_host'
 subprocess.run(['xcrun', 'clang++', *flags, KIT / 'NativeBridgeMetalFrontend.mm', KIT / 'bridge/no_copy_import_host.mm',
-                ROOT / 'build/native-metal-bridge/host/libnative_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
                 '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', no_copy_import], check=True)
 # Cold process per mode. A bounded real-driver delay exposes the first-import
 # window; raw owners and mixtures with IOSurface textures must share one import
@@ -174,7 +174,7 @@ for mode in ('raw', 'mixed', 'reentry'):
 # The system's own registration (MTLAddDevice, as the target's discovery calls it for a plugin's device) accepts the device and lists it.
 registered = OUT / 'register_host'
 subprocess.run(['xcrun', 'clang++', *flags, KIT / 'NativeBridgeMetalFrontend.mm', KIT / 'bridge/register_host.mm',
-                ROOT / 'build/native-metal-bridge/host/libnative_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
                 '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', registered], check=True)
 run = subprocess.run([str(registered), loader, str(cache)], capture_output=True, text=True, timeout=600)
 (OUT / 'register_host.log').write_text(run.stdout + run.stderr)
@@ -188,7 +188,7 @@ CALLS = ROOT / 'build/gpu-analysis/quartzcore-metal-calls.json'
 if CALLS.is_file():
     coverage = OUT / 'selector_coverage_host'
     subprocess.run(['xcrun', 'clang++', *flags, '-Wno-unused-function', KIT / 'NativeBridgeMetalFrontend.mm', KIT / 'bridge/selector_coverage_host.mm',
-                    ROOT / 'build/native-metal-bridge/host/libnative_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                    ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
                     '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', coverage], check=True)
     run = subprocess.run([str(coverage), loader, str(cache), str(CALLS)], capture_output=True, text=True, timeout=600)
     (OUT / 'selector_coverage_host.log').write_text(run.stdout + run.stderr)
@@ -199,7 +199,7 @@ if CALLS.is_file():
 # The GPU scanout presenter (GpuScanoutPresenter.h): the GPU copies a frame into scanout stand-in pages, every pixel compared, on the native frontend.
 presenter = OUT / 'present_host'
 subprocess.run(['xcrun', 'clang++', *flags, KIT / 'NativeBridgeMetalFrontend.mm', KIT / 'bridge/present_host.mm',
-                ROOT / 'build/native-metal-bridge/host/libnative_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
                 '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', presenter], check=True)
 run = subprocess.run([str(presenter), loader, str(cache)], capture_output=True, text=True, timeout=600)
 (OUT / 'present_host.log').write_text(run.stdout + run.stderr)
@@ -217,7 +217,7 @@ if not HOSTSIM.is_file() or not HOST_TURNIP.is_file():
 driver_cache = OUT / 'driver_cache_host'
 subprocess.run(['xcrun', 'clang++', '-std=c++17', '-O1', '-Wall', '-Wextra', '-Werror',
                 '-I', KIT / 'bridge', KIT / 'bridge/driver_cache_host.cpp',
-                ROOT / 'build/native-metal-bridge/host/libnative_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
                 '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', driver_cache], check=True)
 cache_env = {k: v for k, v in os.environ.items() if not k.startswith(('IR3_', 'FD_MESA_', 'NIR_', 'TU_', 'HOSTSIM_', 'MESA_', 'METAL2VULKAN_'))}
 cache_env.update(DYLD_INSERT_LIBRARIES=str(HOSTSIM), MESA_SHADER_CACHE_DISABLE='true', MESA_LOG='')
@@ -232,7 +232,7 @@ with tempfile.TemporaryDirectory(prefix='runtime-driver-cache-', dir=OUT) as tem
         print(run.stdout, end='')
 sequence = OUT / 'plugin_sequence_host'
 subprocess.run(['xcrun', 'clang++', *flags, KIT / 'NativeBridgeMetalFrontend.mm', KIT / 'bridge/plugin_sequence_host.mm',
-                ROOT / 'build/native-metal-bridge/host/libnative_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
+                ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a', '-framework', 'Foundation', '-framework', 'Metal',
                 '-framework', 'IOSurface', '-framework', 'CoreFoundation', '-o', sequence], check=True)
 hostcache = OUT / 'hostsim-cache'
 hostcache.mkdir(exist_ok=True)
