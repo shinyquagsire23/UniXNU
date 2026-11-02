@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pack the owner-built Adreno Metal plugin into a GPU addon file for the boot payload.
 
-  make-gpu-addon.py [--publish] [--selftest] [--ca-prefs] [--reset-mobilegestalt] [--tu-debug OPTIONS] [--clients NAME,...] [--wallpaper DIR] [--prime-list FILE] OUTPUT
+  make-gpu-addon.py [--publish] [--selftest] [--ca-prefs] [--reset-mobilegestalt] [--tu-debug OPTIONS] [--clients NAME,...] [--wallpaper DIR] [--cryptex-app DIR] [--prime-list FILE] OUTPUT
 
 The files are the ones add-gpu-plugin-data.py stages into a Data seed, with the same paths below /private/var/ngpu and the same modes:
 addons/NativeAdrenoMetal.bundle/*, addons/NativeAdrenoMetal.publish (--publish), addons/NativeAdrenoMetal.selftest (--selftest: the plugin's once-per-process
@@ -10,7 +10,10 @@ prefs-mobile/ and prefs-root/ {com.apple.coreanimation,com.apple.backboardd,back
 add-gpu-plugin-data.py writes into a seed, no deep framebuffer and no compression; the kernel writes the two prefixes to
 /private/var/{mobile,root}/Library/Preferences),
 bin/adrenoprobed and daemons/*.plist. --wallpaper adds the files of DIR (scripts/make-wallpaper-overlay.py) as wallpaper/*, which the
-kernel mounts over the default wallpaper's layered animation. --prime-list adds FILE (the absolute paths of the OS image's .metallib
+kernel mounts over the default wallpaper's layered animation. --cryptex-app adds the files of DIR (the mounted App cryptex of the IPSW,
+Cryptex1,AppOS: Safari's history, bookmarks and other support services) as cx/App/*, keeping their execute bits; the kernel mounts
+/private/var/ngpu/cx over /System/Cryptexes, whose App symlink points into a Preboot this board does not have. Their CDHashes come
+from the App trust cache (make-owner-trust-bundle.py --app-trust). --prime-list adds FILE (the absolute paths of the OS image's .metallib
 files, one per line) as addons/NativeAdrenoMetal.primelist, the libraries the render server compiles ahead (PrimeShaders.h). The payload carries the file next to the kernel (unixnu build payload --gpu-addon), the loader
 hands it to the kernel as /chosen/memory-map/GpuAddon, and the kernel writes every file whose content or mode differs into the mounted
 Data volume before its addon mounts (sheng-gpu-addon=1). The Data seed then no longer changes with the plugin, so its persistent store
@@ -51,6 +54,13 @@ def main():
         del args[at:at + 2]
         if not wallpaper.is_dir():
             sys.exit('--wallpaper takes a directory')
+    cryptex_app = None
+    if '--cryptex-app' in args:
+        at = args.index('--cryptex-app')
+        cryptex_app = Path(args[at + 1])
+        del args[at:at + 2]
+        if not (cryptex_app / 'usr/libexec/com.apple.Safari.History').is_file():
+            sys.exit('--cryptex-app takes the mounted App cryptex (no usr/libexec/com.apple.Safari.History in it)')
     prime_list = None
     if '--prime-list' in args:
         at = args.index('--prime-list')
@@ -115,6 +125,12 @@ def main():
     if wallpaper:
         for path in sorted(p for p in wallpaper.rglob('*') if p.is_file()):
             files.append(('wallpaper/' + path.relative_to(wallpaper).as_posix(), 0o644, path.read_bytes()))
+    if cryptex_app:
+        for path in sorted(p for p in cryptex_app.rglob('*') if p.is_file() and not p.is_symlink()):
+            name = 'cx/App/' + path.relative_to(cryptex_app).as_posix()
+            if '..' in name:   # the kernel refuses any name containing two dots
+                sys.exit('Bad cryptex path ' + name)
+            files.append((name, 0o755 if path.stat().st_mode & 0o111 else 0o644, path.read_bytes()))
     body = b''
     for name, mode, data in files:
         encoded = name.encode() + b'\0'
