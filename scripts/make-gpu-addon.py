@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pack the owner-built Adreno Metal plugin into a GPU addon file for the boot payload.
 
-  make-gpu-addon.py [--publish] [--selftest] [--ca-prefs] [--clients NAME,...] [--wallpaper DIR] [--prime-list FILE] OUTPUT
+  make-gpu-addon.py [--publish] [--selftest] [--ca-prefs] [--reset-mobilegestalt] [--clients NAME,...] [--wallpaper DIR] [--prime-list FILE] OUTPUT
 
 The files are the ones add-gpu-plugin-data.py stages into a Data seed, with the same paths below /private/var/ngpu and the same modes:
 addons/NativeAdrenoMetal.bundle/*, addons/NativeAdrenoMetal.publish (--publish), addons/NativeAdrenoMetal.selftest (--selftest: the plugin's once-per-process
@@ -36,7 +36,10 @@ def pad(data):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if a not in ('--publish', '--selftest', '--ca-prefs')]
+    args = [a for a in sys.argv[1:] if a not in ('--publish', '--selftest', '--ca-prefs', '--reset-mobilegestalt')]
+    # --reset-mobilegestalt: the kernel removes MobileGestalt's answer cache once (when this marker is new), so a changed device-tree
+    # answer (artwork-display-gamut) takes effect on a Data volume that already cached the old one
+    reset_mobilegestalt = '--reset-mobilegestalt' in sys.argv[1:]
     ca_prefs = '--ca-prefs' in sys.argv[1:]
     publish = '--publish' in sys.argv[1:]
     selftest = '--selftest' in sys.argv[1:]
@@ -77,6 +80,8 @@ def main():
         files.append(('addons/NativeAdrenoMetal.publish', 0o644, b'1\n'))
     if selftest:
         files.append(('addons/NativeAdrenoMetal.selftest', 0o644, b'1\n'))
+    if reset_mobilegestalt:
+        files.append(('reset/mobilegestalt-cache', 0o644, b'artwork-display-gamut sRGB\n'))
     if ca_prefs:
         # backboardd picks a 10-bit deep framebuffer unless told not to and reads this when it starts, before the plugin can act
         import plistlib

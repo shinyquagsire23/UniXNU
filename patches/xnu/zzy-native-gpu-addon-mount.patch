@@ -2,7 +2,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 index a5ff474..4704203 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -7193,6 +7193,336 @@ uint64_t native_owner_data_seed_base, native_owner_data_seed_size;
+@@ -7193,6 +7193,356 @@ uint64_t native_owner_data_seed_base, native_owner_data_seed_size;
  uint8_t native_owner_data_seed_sha256[32];
  char native_owner_data_device_path[64];
  
@@ -206,6 +206,23 @@ index a5ff474..4704203 100644
 +	}
 +	return 0;
 +}
++/* One-time resets the addon asks for: a reset/<name> entry is written below /private/var/ngpu like any file, and only when that
++ * marker is new or changed does its action run. reset/mobilegestalt-cache removes MobileGestalt's answer cache, which keeps the
++ * display gamut (HasExtendedColorDisplay, from /product artwork-display-gamut) it computed once, so a changed device tree takes
++ * effect. native_gpu_addon_reset: -1 nothing asked, 0 done (or nothing to remove), else the error. */
++extern int unlink1(vfs_context_t, vnode_t, user_addr_t, enum uio_seg, int);
++volatile int native_gpu_addon_reset = -1;
++static int
++native_gpu_addon_reset_action(const char *name, vfs_context_t ctx)
++{
++	if (!strcmp(name, "reset/mobilegestalt-cache")) {
++		static const char cache[] =
++		    "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist";
++		int error = unlink1(ctx, NULLVP, CAST_USER_ADDR_T(cache), UIO_SYSSPACE, 0);
++		return error == ENOENT ? 0 : error;
++	}
++	return EINVAL;
++}
 +static void
 +native_gpu_addon_install(proc_t p, user_addr_t scratch)
 +{
@@ -292,6 +309,9 @@ index a5ff474..4704203 100644
 +			if (error == ENOENT && !(error = native_gpu_addon_parents(p, scratch, path))) {
 +				error = native_gpu_addon_write(path, data, size, mode, owner, ctx);
 +			}
++			if (!error && !strncmp(name, "reset/", 6)) {
++				native_gpu_addon_reset = native_gpu_addon_reset_action(name, ctx);
++			}
 +		}
 +		if (data) {
 +			kfree_data(data, size ? size : 1);
@@ -339,7 +359,7 @@ index a5ff474..4704203 100644
  static int
  native_owner_data_prepare(proc_t p, user_addr_t scratch)
  {
-@@ -7251,6 +7581,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+@@ -7251,6 +7601,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
  	if (actual != device || (vfs_flags(data_mount) & MNT_RDONLY) ||
  	    strcmp(vfs_statfs(data_mount)->f_fstypename, "apfs")) error = EINVAL;
  	if (!error) native_owner_data_stage = 4;
