@@ -5,8 +5,11 @@ verified unchanged against build/original-static-system-trust; only the plugin's
 
   make-owner-trust-bundle.py [--app-trust FILE]
 
---app-trust appends the App cryptex's trust module (FILE: the IPSW's Cryptex1,AppTrustCache, an IM4P) byte for byte as a fourth module,
-for the App cryptex files the GPU addon carries (make-gpu-addon.py --cryptex-app)."""
+--app-trust adds a fourth, owner module with the CDHashes of the App cryptex's trust module (FILE: the IPSW's Cryptex1,AppTrustCache,
+an IM4P), for the App cryptex files the GPU addon carries (make-gpu-addon.py --cryptex-app). Apple's entries carry launch-constraint
+categories 1 and 2, which require the binary to lie on an authenticated (system or cryptex) volume; the addon's copies lie on owner Data,
+so AMFI killed webbookmarksd with "Launch Constraint Violation ... (Constraint not matched)" (pdx203 usb-52). The owner module keeps each
+hash and hash type and has category 0, as the plugin's own entries do."""
 import hashlib
 import json
 from pathlib import Path
@@ -22,6 +25,10 @@ if sys.argv[1:2] == ['--app-trust'] and len(sys.argv) == 3:
     app_module = im4p_payload(Path(sys.argv[2]).read_bytes())
     if struct.unpack_from('<I', app_module)[0] != 2 or len(app_module) != 24 + 24 * struct.unpack_from('<I', app_module, 20)[0]:
         raise SystemExit('The App trust cache is not one version 2 trust module')
+    app_entries = [app_module[24 + 24 * i:48 + 24 * i] for i in range(struct.unpack_from('<I', app_module, 20)[0])]
+    app_identifier = uuid.uuid5(uuid.NAMESPACE_URL, 'org.blu-sharky.app-cryptex:' + ''.join(e[:20].hex() for e in app_entries))
+    # cdhash[20], hash type, flags, launch-constraint category (0: none), reserved
+    app_module = struct.pack('<I16sI', 2, app_identifier.bytes, len(app_entries)) + b''.join(e[:21] + bytes([e[21], 0, 0]) for e in app_entries)
 elif sys.argv[1:]:
     raise SystemExit(__doc__)
 original = (ROOT / 'build/original-static-system-trust/original-static-system.bundle').read_bytes()
@@ -72,5 +79,5 @@ out.write_bytes(bundle)
 (ROOT / 'build/adreno-metal-plugin/owner-trust.json').write_text(json.dumps(dict(
     bundle_sha256=hashlib.sha256(bundle).hexdigest(), own_cdhashes=[h.hex() for h in hashes], original_modules_unchanged=True, app_trust_module=bool(app_module),
     apple_trust_chain_verified=False, purpose='owner trust for the Adreno Metal plugin only'), indent=2) + '\n')
-print('PASS: owner trust bundle (own module + both original modules%s)' % (' + the App cryptex module' if app_module else ''),
+print('PASS: owner trust bundle (own module + both original modules%s)' % (' + the App cryptex owner module' if app_module else ''),
       hashlib.sha256(bundle).hexdigest())
