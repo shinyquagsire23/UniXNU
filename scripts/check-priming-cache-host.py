@@ -38,7 +38,7 @@ require(shutil.disk_usage(ROOT).free > 5 * 1024**3 + 256 * 1024**2, 'Preserve 5 
 OUT.mkdir(exist_ok=True)
 work.mkdir(parents=True)
 loader, program = OUT / 'libOfflinePrimingCacheControl.dylib', OUT / 'priming_cache_host'
-bridge = ROOT / 'build/native-metal-bridge/host/libnative_metal_bridge.a'
+bridge = ROOT / 'build/adreno-metal-bridge/host/libadreno_metal_bridge.a'
 driver = ROOT / 'build/mesa-tu/src/freedreno/vulkan/libvulkan_freedreno.dylib'
 peer = ROOT / 'build/turnip-darwin-host/libhostiokit.dylib'
 flags = ['xcrun', 'clang++', '-O1', '-std=c++17', '-Wall', '-Wextra', '-Werror']
@@ -52,7 +52,7 @@ if args.cross_build_ios:
     target = OUT / 'ios'
     target.mkdir(exist_ok=True)
     sdk = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True, timeout=10).strip()
-    ios_bridge = ROOT / 'build/native-metal-bridge/ios/libnative_metal_bridge.a'
+    ios_bridge = ROOT / 'build/adreno-metal-bridge/ios/libadreno_metal_bridge.a'
     peer_dir = ROOT / 'build/turnip-ios-compiler-peer'
     ios_peer = peer_dir / 'libOfflineTurnipCompilerPeer.dylib'
     peer_build = json.loads((peer_dir / 'build-report.json').read_text())

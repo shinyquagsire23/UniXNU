@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Pack the owner-built Adreno Metal plugin into a GPU addon file for the boot payload.
 
-  make-gpu-addon.py [--publish] [--clients NAME,...] [--wallpaper DIR] [--prime-list FILE] OUTPUT
+  make-gpu-addon.py [--publish] [--selftest] [--clients NAME,...] [--wallpaper DIR] [--prime-list FILE] OUTPUT
 
 The files are the ones add-gpu-plugin-data.py stages into a Data seed, with the same paths below /private/var/ngpu and the same modes:
-addons/NativeAdrenoMetal.bundle/*, addons/NativeAdrenoMetal.publish (--publish), addons/NativeAdrenoMetal.clients (--clients),
+addons/NativeAdrenoMetal.bundle/*, addons/NativeAdrenoMetal.publish (--publish), addons/NativeAdrenoMetal.selftest (--selftest: the plugin's once-per-process
+on-device self-test, NativeAdrenoMetalPlugin.mm), addons/NativeAdrenoMetal.clients (--clients),
 bin/adrenoprobed and daemons/*.plist. --wallpaper adds the files of DIR (scripts/make-wallpaper-overlay.py) as wallpaper/*, which the
 kernel mounts over the default wallpaper's layered animation. --prime-list adds FILE (the absolute paths of the OS image's .metallib
 files, one per line) as addons/NativeAdrenoMetal.primelist, the libraries the render server compiles ahead (PrimeShaders.h). The payload carries the file next to the kernel (unixnu build payload --gpu-addon), the loader
@@ -32,8 +33,9 @@ def pad(data):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if a != '--publish']
-    publish = len(args) != len(sys.argv) - 1
+    args = [a for a in sys.argv[1:] if a not in ('--publish', '--selftest')]
+    publish = '--publish' in sys.argv[1:]
+    selftest = '--selftest' in sys.argv[1:]
     clients = None
     wallpaper = None
     if '--wallpaper' in args:
@@ -69,6 +71,8 @@ def main():
         files.append(('addons/NativeAdrenoMetal.bundle/' + path.relative_to(BUNDLE).as_posix(), mode, path.read_bytes()))
     if publish:
         files.append(('addons/NativeAdrenoMetal.publish', 0o644, b'1\n'))
+    if selftest:
+        files.append(('addons/NativeAdrenoMetal.selftest', 0o644, b'1\n'))
     if clients:
         files.append(('addons/NativeAdrenoMetal.clients', 0o644, ('\n'.join(clients) + '\n').encode()))
     if prime_list:

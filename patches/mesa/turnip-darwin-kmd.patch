@@ -1229,7 +1229,7 @@ index 0000000..b03c6ee
 +   /* With IO-coherent BOs (the kernel reports NativeAdrenoParamsOwnedCoherent) the GPU maps the pages write-back inner-shareable, so the CPU
 +    * view is a write-back one too: a write-combined view of a page the GPU snoops and the kernel's cacheable alias would disagree. */
 +   uint32_t options = (placed_addr ? 0 : kIOMapAnywhere) |
-+                      ((dw.params.flags & NativeAdrenoParamsOwnedCoherent) ? kIOMapCopybackCache : kIOMapWriteCombineCache);
++                      ((dw.params.flags & 2u /* NativeAdrenoParamsOwnedCoherent: Adreno740 only, never set by Adreno650 */) ? kIOMapCopybackCache : kIOMapWriteCombineCache);
 +   kr = IOConnectMapMemory64(dw.conn, reply.token, mach_task_self(), &address, &length, options);
 +   if (kr != KERN_SUCCESS || !address || length < bo->size) {
 +      NativeAdrenoAbiBoCpuUnmap undo = {.handle = bo->darwin_handle, .token = reply.token};
