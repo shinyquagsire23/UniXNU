@@ -1,0 +1,20 @@
+diff --git a/bsd/vfs/vfs_lookup.c b/bsd/vfs/vfs_lookup.c
+--- a/bsd/vfs/vfs_lookup.c
++++ b/bsd/vfs/vfs_lookup.c
+@@ -1565,7 +1565,15 @@ lookup_traverse_union(vnode_t dvp, vnode_t *new_dvp, vfs_context_t ctx)
+ 	NDINIT(&nd, LOOKUP, OP_LOOKUP, USEDVP, UIO_SYSSPACE, CAST_USER_ADDR_T(pp), ctx);
+ 	nd.ni_dvp = dvp->v_mount->mnt_vnodecovered;
+ 	error = namei(&nd);
+-	if (error == 0) {
++	/* pdx203: a directory of the upper layer can be a symlink (or a file) in the lower one: the SystemOS union over / has real
++	 * framework directories where the OS volume has symlinks into /System/Cryptexes/OS. Continuing the lookup in that vnode
++	 * failed every miss below such a directory with ENOTDIR instead of ENOENT, and CFBundle gave up on the bundle
++	 * (MobileSafari: SafariShared.framework/Base.lproj ENOTDIR, then "nil URL argument", pdx203 usb-60). There is nothing
++	 * below a non-directory to merge: the miss stays a miss. */
++	if (error == 0 && vnode_vtype(nd.ni_vp) != VDIR) {
++		vnode_put(nd.ni_vp);
++		error = ENOENT;
++	} else if (error == 0) {
+ 		*new_dvp = nd.ni_vp;
+ 	}
+ 	nameidone(&nd);
