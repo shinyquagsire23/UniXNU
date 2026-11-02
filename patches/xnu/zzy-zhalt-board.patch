@@ -1,0 +1,23 @@
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -797,9 +797,19 @@ ml_get_machine_mem(void)
+ }
+ 
+ __attribute__((noreturn))
++/* pdx203: the board's own halt and restart (package/ButtonProbe.cpp sets it once the PMIC is reachable): on SM8250 the PSCI
++ * firmware reports SYSTEM_RESET as not supported, and Apple's platform driver resets through a watchdog this board does not
++ * have, so neither shutdown nor restart did anything. The hook programs the PMIC's PS_HOLD reset type and drops PS_HOLD; it does
++ * not return. */
++void (*volatile native_board_halt_restart)(int reboot) = NULL;
++
+ void
+ halt_all_cpus(boolean_t reboot)
+ {
++	if (native_board_halt_restart) {
++		printf("%s (board)\n", reboot ? "MACH Reboot" : "CPU halted");
++		native_board_halt_restart(reboot ? 1 : 0);
++	}
+ 	if (reboot) {
+ 		printf("MACH Reboot\n");
+ 		PEHaltRestart(kPERestartCPU);
