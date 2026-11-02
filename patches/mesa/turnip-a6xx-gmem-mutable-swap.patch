@@ -1,7 +1,21 @@
 diff --git a/src/freedreno/vulkan/tu_clear_blit.cc b/src/freedreno/vulkan/tu_clear_blit.cc
 --- a/src/freedreno/vulkan/tu_clear_blit.cc
 +++ b/src/freedreno/vulkan/tu_clear_blit.cc
-@@ -1621,15 +1621,19 @@
+@@ -1594,7 +1594,12 @@
+                   const struct tu_image_view *iview,
+                   uint32_t layer)
+ {
+-   r3d_src_load<CHIP>(cmd, cs, iview, layer, VK_FILTER_NEAREST, true);
++   /* a6xx writes every attachment to GMEM in WZYX order whatever the color swap of RB_MRT_BUF_INFO (no MUTABLEEN, a7xx+), as
++    * draws do, so a load into GMEM has to undo the swap of the memory itself: it samples with the view's own swap. Only a linear
++    * attachment has a non-identity swap; a BGRA IOSurface loaded by a draw (tu_attachment_unpadded) otherwise reached GMEM with
++    * red and blue exchanged and was stored back that way, flipping whole bins on every pass that loaded them (pdx203).
++    */
++   r3d_src_load<CHIP>(cmd, cs, iview, layer, VK_FILTER_NEAREST, CHIP >= A7XX);
+ }
+ 
+ template <chip CHIP>
+@@ -1621,15 +1626,19 @@
     uint32_t desc[FDL6_TEX_CONST_DWORDS];
     memcpy(desc, iview->view.descriptor, sizeof(desc));
  
@@ -23,7 +37,7 @@ diff --git a/src/freedreno/vulkan/tu_clear_blit.cc b/src/freedreno/vulkan/tu_cle
        tu_desc_set_swap<CHIP>(desc, WZYX);
  
     /* If FDM offset is used, the last row and column extend beyond the
-@@ -5846,11 +5850,13 @@
+@@ -5846,11 +5855,13 @@
      * programmed when we setup the color attachment because the attachment in
      * GMEM ignores the swap except when MUTABLEEN is enabled. If the
      * color attachment is linear, we need to use the identity swap even if the
