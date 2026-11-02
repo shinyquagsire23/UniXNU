@@ -6,7 +6,7 @@
 The files are the ones add-gpu-plugin-data.py stages into a Data seed, with the same paths below /private/var/ngpu and the same modes:
 addons/NativeAdrenoMetal.bundle/*, addons/NativeAdrenoMetal.publish (--publish), addons/NativeAdrenoMetal.selftest (--selftest: the plugin's once-per-process
 on-device self-test, NativeAdrenoMetalPlugin.mm), addons/NativeAdrenoMetal.clients (--clients),
-prefs-mobile/backboardd.plist and prefs-root/backboardd.plist (--ca-prefs: the render server's Core Animation preferences
+prefs-mobile/ and prefs-root/ {com.apple.coreanimation,com.apple.backboardd,backboardd}.plist (--ca-prefs: the render server's Core Animation preferences
 add-gpu-plugin-data.py writes into a seed, no deep framebuffer and no compression; the kernel writes the two prefixes to
 /private/var/{mobile,root}/Library/Preferences),
 bin/adrenoprobed and daemons/*.plist. --wallpaper adds the files of DIR (scripts/make-wallpaper-overlay.py) as wallpaper/*, which the
@@ -82,8 +82,12 @@ def main():
         import plistlib
         values = plistlib.dumps({'CAEnableDeepFramebuffer': False, 'CAEnableFramebufferCompression': False,
                                  'CAEnableIOSurfaceCompression': False}, fmt=plistlib.FMT_BINARY)
-        files.append(('prefs-mobile/backboardd.plist', 0o644, values))
-        files.append(('prefs-root/backboardd.plist', 0o644, values))
+        # Every domain the keys can be read from without touching .GlobalPreferences (which the kernel cannot merge): QuartzCore's own
+        # (com.apple.coreanimation), the render server's bundle identifier and its process name. pdx203 usb-30: backboardd.plist alone
+        # left the deep framebuffer on (every refused surface 'b3a8', 30RGBLE_8A_BiPlanar).
+        for domain in ('com.apple.coreanimation', 'com.apple.backboardd', 'backboardd'):
+            files.append(('prefs-mobile/%s.plist' % domain, 0o644, values))
+            files.append(('prefs-root/%s.plist' % domain, 0o644, values))
     if clients:
         files.append(('addons/NativeAdrenoMetal.clients', 0o644, ('\n'.join(clients) + '\n').encode()))
     if prime_list:
