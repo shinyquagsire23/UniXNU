@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pack the owner-built Adreno Metal plugin into a GPU addon file for the boot payload.
 
-  make-gpu-addon.py [--publish] [--selftest] [--ca-prefs] [--reset-mobilegestalt] [--tu-debug OPTIONS] [--clients NAME,...] [--wallpaper DIR] [--cryptex-app DIR] [--prime-list FILE] OUTPUT
+  make-gpu-addon.py [--publish] [--selftest] [--ca-prefs] [--reset-mobilegestalt] [--tu-debug OPTIONS] [--clients NAME,...] [--wallpaper DIR] [--cryptex-app DIR] [--cryptex-os DIR ROOT] [--prime-list FILE] OUTPUT
 
 The files are the ones add-gpu-plugin-data.py stages into a Data seed, with the same paths below /private/var/ngpu and the same modes:
 addons/NativeAdrenoMetal.bundle/*, addons/NativeAdrenoMetal.publish (--publish), addons/NativeAdrenoMetal.selftest (--selftest: the plugin's once-per-process
@@ -13,7 +13,12 @@ bin/adrenoprobed and daemons/*.plist. --wallpaper adds the files of DIR (scripts
 kernel mounts over the default wallpaper's layered animation. --cryptex-app adds the files of DIR (the mounted App cryptex of the IPSW,
 Cryptex1,AppOS: Safari's history, bookmarks and other support services) as cx/App/*, keeping their execute bits; the kernel mounts
 /private/var/ngpu/cx over /System/Cryptexes, whose App symlink points into a Preboot this board does not have. Their CDHashes come
-from the App trust cache (make-owner-trust-bundle.py --app-trust). --prime-list adds FILE (the absolute paths of the OS image's .metallib
+from the App trust cache (make-owner-trust-bundle.py --app-trust). --cryptex-os adds, as cx/OS/*, the files of DIR (the mounted SystemOS
+cryptex, Cryptex1,SystemOS) that the root filesystem ROOT (the mounted OS image) reaches through its symlinks into /System/Cryptexes/OS:
+Safari's and WebKit's frameworks (SafariShared.framework and the others are such symlinks, and their resources lie only in the cryptex) and
+the WebContent, GPU and Networking extensions. Without them MobileSafari threw "nil URL argument" loading SafariShared's built-in lists
+(pdx203 usb-57). The SystemOS trust module is one of the two original ones. A file whose addon path is longer than the kernel takes is
+left out and named. --prime-list adds FILE (the absolute paths of the OS image's .metallib
 files, one per line) as addons/NativeAdrenoMetal.primelist, the libraries the render server compiles ahead (PrimeShaders.h). The payload carries the file next to the kernel (unixnu build payload --gpu-addon), the loader
 hands it to the kernel as /chosen/memory-map/GpuAddon, and the kernel writes every file whose content or mode differs into the mounted
 Data volume before its addon mounts (sheng-gpu-addon=1). The Data seed then no longer changes with the plugin, so its persistent store
@@ -61,6 +66,15 @@ def main():
         del args[at:at + 2]
         if not (cryptex_app / 'usr/libexec/com.apple.Safari.History').is_file():
             sys.exit('--cryptex-app takes the mounted App cryptex (no usr/libexec/com.apple.Safari.History in it)')
+    cryptex_os = None
+    if '--cryptex-os' in args:
+        at = args.index('--cryptex-os')
+        cryptex_os = (Path(args[at + 1]), Path(args[at + 2]))
+        del args[at:at + 3]
+        if not (cryptex_os[0] / 'System/Library/Caches/com.apple.dyld').is_dir():
+            sys.exit('--cryptex-os takes the mounted SystemOS cryptex (no System/Library/Caches/com.apple.dyld in it) and the mounted OS image')
+        if not (cryptex_os[1] / 'System/Cryptexes/OS').is_symlink():
+            sys.exit('--cryptex-os takes the mounted OS image second (no System/Cryptexes/OS symlink in it)')
     prime_list = None
     if '--prime-list' in args:
         at = args.index('--prime-list')
@@ -131,6 +145,26 @@ def main():
             if '..' in name:   # the kernel refuses any name containing two dots
                 sys.exit('Bad cryptex path ' + name)
             files.append((name, 0o755 if path.stat().st_mode & 0o111 else 0o644, path.read_bytes()))
+    if cryptex_os:
+        system_os, root = cryptex_os
+        marker = 'System/Cryptexes/OS/'
+        targets = set()
+        for link in root.rglob('*'):
+            if link.is_symlink() and link != root / 'System/Cryptexes/OS' and marker in str(link.readlink()):
+                target = str(link.readlink()).split(marker, 1)[1]
+                if not (system_os / target).exists():
+                    sys.exit(f'{link.relative_to(root)} points at {target}, which the SystemOS cryptex lacks')
+                targets.add(target)
+        for target in sorted(targets):
+            top = system_os / target
+            for path in sorted([top] if top.is_file() else (p for p in top.rglob('*') if p.is_file() and not p.is_symlink())):
+                name = 'cx/OS/' + path.relative_to(system_os).as_posix()
+                if '..' in name:
+                    sys.exit('Bad cryptex path ' + name)
+                if len(name.encode()) + 1 > 160:
+                    print('left out (path too long): ' + name, file=sys.stderr)
+                    continue
+                files.append((name, 0o755 if path.stat().st_mode & 0o111 else 0o644, path.read_bytes()))
     body = b''
     for name, mode, data in files:
         encoded = name.encode() + b'\0'
