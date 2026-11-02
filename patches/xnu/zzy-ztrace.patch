@@ -1,0 +1,150 @@
+diff --git a/bsd/vfs/vfs_lookup.c b/bsd/vfs/vfs_lookup.c
+--- a/bsd/vfs/vfs_lookup.c
++++ b/bsd/vfs/vfs_lookup.c
+@@ -127,6 +127,60 @@ static int              lookup_handle_rsrc_fork(vnode_t dp, struct nameidata *nd
+ 
+ extern lck_rw_t rootvnode_rw_lock;
+ 
++/* pdx203 per-process file trace: with boot-arg pdx203-trace=NAME, every failed namei of a process of that name and every MAC (sandbox)
++ * denial on a vnode it is checked against prints a TRACE row (operation, errno, path), at most pdx203-trace-max rows (default 1500)
++ * per boot. MobileSafari found none of SafariShared's resources though the kernel resolves them (pdx203 usb-59 PATHDIAG). */
++#include <pexpert/pexpert.h>
++static char native_trace_name[MAXCOMLEN + 1];
++static int native_trace_state = -1;
++static uint32_t native_trace_max = 1500;
++static _Atomic uint32_t native_trace_rows;
++int native_trace_wanted(void);
++void native_trace_row(const char *op, vnode_t vp, const char *path, const char *name, size_t namelen, int error);
++int
++native_trace_wanted(void)
++{
++	if (native_trace_state < 0) {
++		char wanted[64] = {0};
++		uint32_t max = 0;
++		if (PE_parse_boot_argn("pdx203-trace-max", &max, sizeof(max)) && max) {
++			native_trace_max = max;
++		}
++		if (PE_parse_boot_argn("pdx203-trace", wanted, sizeof(wanted)) && wanted[0]) {
++			strlcpy(native_trace_name, wanted, sizeof(native_trace_name));
++			native_trace_state = 1;
++		} else {
++			native_trace_state = 0;
++		}
++	}
++	if (native_trace_state != 1 || os_atomic_load(&native_trace_rows, relaxed) >= native_trace_max) {
++		return 0;
++	}
++	char name[MAXCOMLEN + 1] = {0};
++	proc_selfname(name, sizeof(name));
++	return strcmp(name, native_trace_name) == 0;
++}
++void
++native_trace_row(const char *op, vnode_t vp, const char *path, const char *name, size_t namelen, int error)
++{
++	if (!native_trace_wanted() || os_atomic_inc_orig(&native_trace_rows, relaxed) >= native_trace_max) {
++		return;
++	}
++	char *buffer = NULL;
++	if (!path && vp) {
++		buffer = kalloc_data(MAXPATHLEN, Z_WAITOK | Z_ZERO);
++		int length = MAXPATHLEN;
++		if (buffer && vn_getpath(vp, buffer, &length) == 0) {
++			path = buffer;
++		}
++	}
++	printf("TRACE %s[%d] %s err %d %s%s%.*s\n", native_trace_name, proc_selfpid(), op, error, path ? path : "?",
++	    name ? "/" : "", name ? (int)namelen : 0, name ? name : "");
++	if (buffer) {
++		kfree_data(buffer, MAXPATHLEN);
++	}
++}
++
+ /*
+  * Convert a pathname into a pointer to a locked inode.
+  *
+@@ -549,6 +603,9 @@ error_out:
+ 		rootdir_with_usecount = NULLVP;
+ 	}
+ 
++	if (error && cnp->cn_pnbuf && native_trace_wanted()) {
++		native_trace_row("namei", NULLVP, cnp->cn_pnbuf, NULL, 0, error);
++	}
+ 	if ((cnp->cn_flags & HASBUF)) {
+ 		cnp->cn_flags &= ~HASBUF;
+ 		zfree(ZV_NAMEI, cnp->cn_pnbuf);
+diff --git a/security/mac_vfs.c b/security/mac_vfs.c
+--- a/security/mac_vfs.c
++++ b/security/mac_vfs.c
+@@ -943,6 +943,8 @@ mac_cred_check_label_update_execve(vfs_context_t ctx, struct vnode *vp, off_t of
+ 	return result;
+ }
+ 
++extern void native_trace_row(const char *op, vnode_t vp, const char *path, const char *name, size_t namelen, int error);
++
+ int
+ mac_vnode_check_access(vfs_context_t ctx, struct vnode *vp,
+     int acc_mode)
+@@ -1221,6 +1223,7 @@ mac_vnode_check_getattrlist(vfs_context_t ctx, struct vnode *vp,
+ 	}
+ 	VFS_KERNEL_DEBUG_START1(40, vp);
+ 	MAC_CHECK(vnode_check_getattrlist, cred, vp, mac_vnode_label(vp), alist, options);
++	if (error) native_trace_row("getattrlist", vp, NULL, NULL, 0, error);
+ 	VFS_KERNEL_DEBUG_END1(40, vp);
+ 
+ 	/* Falsify results instead of returning error? */
+@@ -1615,6 +1618,7 @@ mac_vnode_check_lookup_preflight(vfs_context_t ctx, struct vnode *dvp,
+ 	}
+ 	VFS_KERNEL_DEBUG_START1(50, dvp);
+ 	MAC_CHECK(vnode_check_lookup_preflight, cred, dvp, mac_vnode_label(dvp), path, pathlen);
++	if (error) native_trace_row("lookup-preflight", dvp, NULL, path, pathlen, error);
+ 	VFS_KERNEL_DEBUG_END1(50, dvp);
+ 	return error;
+ }
+@@ -1638,6 +1642,7 @@ mac_vnode_check_lookup(vfs_context_t ctx, struct vnode *dvp,
+ 	}
+ 	VFS_KERNEL_DEBUG_START1(51, dvp);
+ 	MAC_CHECK(vnode_check_lookup, cred, dvp, mac_vnode_label(dvp), cnp);
++	if (error) native_trace_row("lookup", dvp, NULL, cnp->cn_nameptr, cnp->cn_namelen, error);
+ 	VFS_KERNEL_DEBUG_END1(51, dvp);
+ 	return error;
+ }
+@@ -1660,6 +1665,7 @@ mac_vnode_check_open(vfs_context_t ctx, struct vnode *vp, int acc_mode)
+ 	}
+ 	VFS_KERNEL_DEBUG_START1(52, vp);
+ 	MAC_CHECK(vnode_check_open, cred, vp, mac_vnode_label(vp), acc_mode);
++	if (error) native_trace_row("open", vp, NULL, NULL, 0, error);
+ 	VFS_KERNEL_DEBUG_END1(52, vp);
+ 	return error;
+ }
+@@ -1684,6 +1690,7 @@ mac_vnode_check_read(vfs_context_t ctx, struct ucred *file_cred,
+ 	VFS_KERNEL_DEBUG_START1(53, vp);
+ 	MAC_CHECK(vnode_check_read, cred, file_cred, vp,
+ 	    mac_vnode_label(vp));
++	if (error) native_trace_row("read", vp, NULL, NULL, 0, error);
+ 	VFS_KERNEL_DEBUG_END1(53, vp);
+ 
+ 	return error;
+@@ -1707,6 +1714,7 @@ mac_vnode_check_readdir(vfs_context_t ctx, struct vnode *dvp)
+ 	}
+ 	VFS_KERNEL_DEBUG_START1(54, dvp);
+ 	MAC_CHECK(vnode_check_readdir, cred, dvp, mac_vnode_label(dvp));
++	if (error) native_trace_row("readdir", dvp, NULL, NULL, 0, error);
+ 	VFS_KERNEL_DEBUG_END1(54, dvp);
+ 	return error;
+ }
+@@ -2046,6 +2054,7 @@ mac_vnode_check_stat(vfs_context_t ctx, struct ucred *file_cred,
+ 	VFS_KERNEL_DEBUG_START1(68, vp);
+ 	MAC_CHECK(vnode_check_stat, cred, file_cred, vp,
+ 	    mac_vnode_label(vp));
++	if (error) native_trace_row("stat", vp, NULL, NULL, 0, error);
+ 	VFS_KERNEL_DEBUG_END1(68, vp);
+ 	return error;
+ }
+@@ -2839,6 +2848,7 @@ mac_vnode_check_getattrlistbulk(vfs_context_t ctx, struct vnode *vp, struct attr
+ 	}
+ 	VFS_KERNEL_DEBUG_START1(96, mp);
+ 	MAC_CHECK(vnode_check_getattrlistbulk, cred, vp, alist, options);
++	if (error) native_trace_row("getattrlistbulk", vp, NULL, NULL, 0, error);
+ 	VFS_KERNEL_DEBUG_END1(96, mp);
+ 
+ 	return error;
