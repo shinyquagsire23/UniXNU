@@ -1,0 +1,41 @@
+diff --git a/src/freedreno/vulkan/tu_clear_blit.cc b/src/freedreno/vulkan/tu_clear_blit.cc
+--- a/src/freedreno/vulkan/tu_clear_blit.cc
++++ b/src/freedreno/vulkan/tu_clear_blit.cc
+@@ -1621,15 +1621,19 @@
+    uint32_t desc[FDL6_TEX_CONST_DWORDS];
+    memcpy(desc, iview->view.descriptor, sizeof(desc));
+ 
++   /* GMEM keeps a mutable attachment's swap only with MUTABLEEN, which a6xx does not have (a7xx+): there every attachment is
++    * written to GMEM in WZYX order, so it is read back that way too.
++    */
++   const bool gmem_mutable = iview->view.is_mutable && CHIP >= A7XX;
+    enum a6xx_format fmt =
+       blit_format_texture<CHIP>(format, TILE6_2,
+-                                iview->view.is_mutable, true).fmt;
++                                gmem_mutable, true).fmt;
+    fixup_src_format(&format, dst_format, &fmt);
+ 
+    /* patched for gmem */
+    tu_desc_set_tile_mode<CHIP>(desc, TILE6_2);
+ 
+-   if (!iview->view.is_mutable)
++   if (!gmem_mutable)
+       tu_desc_set_swap<CHIP>(desc, WZYX);
+ 
+    /* If FDM offset is used, the last row and column extend beyond the
+@@ -5846,11 +5850,13 @@
+     * programmed when we setup the color attachment because the attachment in
+     * GMEM ignores the swap except when MUTABLEEN is enabled. If the
+     * color attachment is linear, we need to use the identity swap even if the
+-    * original attachment has a non-identity swap.
++    * original attachment has a non-identity swap. MUTABLEEN is a7xx+: a6xx GMEM
++    * holds a mutable attachment in WZYX order as well (a BGRA IOSurface stored
++    * by CP_BLIT came out with red and blue exchanged in whole bins, pdx203).
+     */
+    struct tu_native_format fmt =
+       blit_format_texture<CHIP>(src_format, TILE6_2,
+-                                src_iview->view.is_mutable, true);
++                                src_iview->view.is_mutable && CHIP >= A7XX, true);
+    enum a6xx_format format = fmt.fmt;
+    fixup_src_format(&src_format, dst_format, &format);
+ 
