@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pack the owner-built Adreno Metal plugin into a GPU addon file for the boot payload.
 
-  make-gpu-addon.py [--publish] [--selftest] [--ca-prefs] [--reset-mobilegestalt] [--clients NAME,...] [--wallpaper DIR] [--prime-list FILE] OUTPUT
+  make-gpu-addon.py [--publish] [--selftest] [--ca-prefs] [--reset-mobilegestalt] [--tu-debug OPTIONS] [--clients NAME,...] [--wallpaper DIR] [--prime-list FILE] OUTPUT
 
 The files are the ones add-gpu-plugin-data.py stages into a Data seed, with the same paths below /private/var/ngpu and the same modes:
 addons/NativeAdrenoMetal.bundle/*, addons/NativeAdrenoMetal.publish (--publish), addons/NativeAdrenoMetal.selftest (--selftest: the plugin's once-per-process
@@ -59,6 +59,15 @@ def main():
         lines = prime_list.read_text().split()
         if not lines or any(not line.startswith('/') or not line.endswith('.metallib') for line in lines):
             sys.exit('--prime-list takes a file of absolute .metallib paths')
+    # --tu-debug OPTIONS: /private/var/ngpu/tu_debug, which the plugin reads into TU_DEBUG before Turnip loads (e.g. sysmem: every pass in
+    # system memory, no GMEM tiles)
+    tu_debug = None
+    if '--tu-debug' in args:
+        at = args.index('--tu-debug')
+        tu_debug = args[at + 1]
+        del args[at:at + 2]
+        if not tu_debug or not all(c.isalnum() or c in ',_-' for c in tu_debug):
+            sys.exit('--tu-debug takes Turnip debug options separated by commas')
     if '--clients' in args:
         at = args.index('--clients')
         clients = [name for name in args[at + 1].split(',') if name]
@@ -80,6 +89,8 @@ def main():
         files.append(('addons/NativeAdrenoMetal.publish', 0o644, b'1\n'))
     if selftest:
         files.append(('addons/NativeAdrenoMetal.selftest', 0o644, b'1\n'))
+    if tu_debug:
+        files.append(('tu_debug', 0o644, (tu_debug + '\n').encode()))
     if reset_mobilegestalt:
         files.append(('reset/mobilegestalt-cache', 0o644, b'artwork-display-gamut sRGB\n'))
     if ca_prefs:
