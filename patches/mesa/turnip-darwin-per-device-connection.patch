@@ -1,0 +1,489 @@
+diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -37,9 +37,12 @@
+ /* 'NTNL': first word of a tunnelled call, as served by the driver (NativeAdrenoPublish.cpp). */
+ #define DW_TUNNEL_MAGIC 0x4e544e4cu
+ 
+-/* One GPU per process: the kernel service has a single connection slot, so the connection and the fence bookkeeping are
+- * process state rather than per tu_device state. */
+-static struct {
++/* One kernel connection: its handle namespace, GPU address window, queue range and fence bookkeeping. Every tu_device owns one
++ * (darwin_retire_state::conn): the driver gives each connection its own client slot and window, and a process may hold several
++ * (SpringBoard creates a second VkDevice while its first is alive). One process-wide connection let the first device's
++ * vkDestroyDevice close the port under the second (IOConnectUnmapMemory64 0x10000003, MACH_SEND_INVALID_DEST, then
++ * VK_ERROR_DEVICE_LOST), and two devices sharing one window allocated colliding addresses from their own VA trees. */
++struct darwin_conn {
+    io_connect_t conn;
+    bool open;
+    pthread_mutex_t lock;
+@@ -55,7 +58,9 @@
+    uint32_t last_fence;
+    NativeAdrenoAbiDeviceInfo info;
+    NativeAdrenoAbiParams params;
+-} dw = { .lock = PTHREAD_MUTEX_INITIALIZER };
++};
++/* The enumeration probe's connection (tu_knl_darwin_load), closed again before any device exists. */
++static struct darwin_conn dw = { .lock = PTHREAD_MUTEX_INITIALIZER };
+ 
+ /* Preserve the native handle, CPU view and IOVA until the captured ring fence
+  * actually completed. An unrelated later submission never extends this lease.
+@@ -112,6 +117,7 @@
+    uint32_t pressure_seen;
+    struct darwin_bo_cache_stats cache_stats;
+    struct darwin_va va;
++   struct darwin_conn conn;   /* this device's kernel connection */
+ };
+ static struct darwin_retire_state *darwin_stats_state;   /* for tu_darwin_bo_cache_stats */
+ 
+@@ -135,13 +141,19 @@
+    pthread_mutex_unlock(&retire->lock);
+ }
+ 
++static inline struct darwin_conn *
++dwc(struct tu_device *dev)
++{
++   return &((struct darwin_retire_state *)dev->darwin_retire)->conn;
++}
++
+ static kern_return_t
+-dw_call(uint32_t method, const void *in, size_t in_size, void *out,
++dw_call(struct darwin_conn *c, uint32_t method, const void *in, size_t in_size, void *out,
+         size_t out_size)
+ {
+    size_t out_bytes = out_size;
+-   if (!dw.tunnel)
+-      return IOConnectCallStructMethod(dw.conn, method, in, in_size, out_size ? out : NULL,
++   if (!c->tunnel)
++      return IOConnectCallStructMethod(c->conn, method, in, in_size, out_size ? out : NULL,
+                                        out_size ? &out_bytes : NULL);
+    uint8_t buffer[8 + sizeof(NativeAdrenoAbiSubmit)];
+    if (in_size > sizeof(NativeAdrenoAbiSubmit))
+@@ -150,18 +162,18 @@
+    memcpy(buffer, header, sizeof(header));
+    if (in_size)
+       memcpy(buffer + sizeof(header), in, in_size);
+-   return IOConnectCallStructMethod(dw.conn, dw.selector, buffer, sizeof(header) + in_size, out_size ? out : NULL,
++   return IOConnectCallStructMethod(c->conn, c->selector, buffer, sizeof(header) + in_size, out_size ? out : NULL,
+                                     out_size ? &out_bytes : NULL);
+ }
+ 
+ /* Finds an admitted selector: the driver answers a tunnel probe (method 0xffffffff) with success for every selector the sandbox lets through. */
+ static bool
+-dw_probe_selector(void)
++dw_probe_selector(struct darwin_conn *c)
+ {
+    const uint32_t header[2] = {DW_TUNNEL_MAGIC, 0xffffffffu};
+    for (uint32_t s = 0; s < 256; s++) {
+-      if (IOConnectCallStructMethod(dw.conn, s, header, sizeof(header), NULL, NULL) == KERN_SUCCESS) {
+-         dw.selector = s;
++      if (IOConnectCallStructMethod(c->conn, s, header, sizeof(header), NULL, NULL) == KERN_SUCCESS) {
++         c->selector = s;
+          return true;
+       }
+    }
+@@ -169,7 +181,7 @@
+ }
+ 
+ static VkResult
+-dw_open_connection(struct tu_instance *instance)
++dw_open_connection(struct darwin_conn *c, struct tu_instance *instance)
+ {
+    /* TU_DARWIN_SERVICE names the IOKit service (default: the AGX accelerator the original Metal discovery finds), TU_DARWIN_OPEN_TYPE its open
+     * type (default 0x4147, the type the driver serves to the plugin). NativeAdrenoGpuPublished with type 0 is the unsandboxed direct form. */
+@@ -186,43 +198,43 @@
+    if (!service)
+       return VK_ERROR_INCOMPATIBLE_DRIVER;
+ 
+-   kern_return_t kr = IOServiceOpen(service, mach_task_self(), open_type, &dw.conn);
++   kern_return_t kr = IOServiceOpen(service, mach_task_self(), open_type, &c->conn);
+    IOObjectRelease(service);
+    if (kr != KERN_SUCCESS) {
+       return vk_startup_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
+                                "IOServiceOpen(%s, 0x%x) failed: 0x%x", service_name, open_type, kr);
+    }
+-   dw.tunnel = !direct;
+-   if (dw.tunnel && !dw_probe_selector()) {
+-      IOServiceClose(dw.conn);
+-      dw.conn = 0;
++   c->tunnel = !direct;
++   if (c->tunnel && !dw_probe_selector(c)) {
++      IOServiceClose(c->conn);
++      c->conn = 0;
+       return vk_startup_errorf(instance, VK_ERROR_INITIALIZATION_FAILED, "no external-method selector is admitted for this process");
+    }
+ 
+-   kr = dw_call(NativeAdrenoMethodQuery, NULL, 0, &dw.params, sizeof(dw.params));
+-   if (kr == KERN_SUCCESS && dw.params.abi_version != NativeAdrenoAbiVersion)
++   kr = dw_call(c, NativeAdrenoMethodQuery, NULL, 0, &c->params, sizeof(c->params));
++   if (kr == KERN_SUCCESS && c->params.abi_version != NativeAdrenoAbiVersion)
+       kr = kIOReturnUnsupported;
+    if (kr == KERN_SUCCESS)
+-      kr = dw_call(NativeAdrenoMethodGetDeviceInfo, NULL, 0, &dw.info, sizeof(dw.info));
++      kr = dw_call(c, NativeAdrenoMethodGetDeviceInfo, NULL, 0, &c->info, sizeof(c->info));
+    if (kr != KERN_SUCCESS) {
+-      IOServiceClose(dw.conn);
+-      dw.conn = 0;
++      IOServiceClose(c->conn);
++      c->conn = 0;
+       return vk_startup_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
+                                "NativeAdreno query failed: 0x%x", kr);
+    }
+-   dw.open = true;
+-   dw.inflight_count = 0;
+-   dw.last_fence = 0;
++   c->open = true;
++   c->inflight_count = 0;
++   c->last_fence = 0;
+    return VK_SUCCESS;
+ }
+ 
+ static void
+-dw_close_connection(void)
++dw_close_connection(struct darwin_conn *c)
+ {
+-   if (dw.open) {
+-      IOServiceClose(dw.conn);
+-      dw.conn = 0;
+-      dw.open = false;
++   if (c->open) {
++      IOServiceClose(c->conn);
++      c->conn = 0;
++      c->open = false;
+    }
+ }
+ 
+@@ -248,7 +260,7 @@
+       if (abs_timeout_ns != UINT64_MAX)
+          slice = abs_timeout_ns > now ? MIN2(abs_timeout_ns - now, slice) : 0;
+       NativeAdrenoAbiWaitFence req = {.fence = fence, .timeout_ns = slice};
+-      kern_return_t kr = dw_call(NativeAdrenoMethodWaitFence, &req, sizeof(req), NULL, 0);
++      kern_return_t kr = dw_call(dwc(dev), NativeAdrenoMethodWaitFence, &req, sizeof(req), NULL, 0);
+       if (kr == KERN_SUCCESS)
+          return VK_SUCCESS;
+       if (kr != kIOReturnTimeout)
+@@ -460,7 +472,7 @@
+    if (!va->seeded) {
+       /* Nothing else allocates from the heap the device made: the whole range is free. */
+       va->seeded = true;
+-      darwin_va_add(va, dev->physical_device->va_start, dev->physical_device->va_size);
++      darwin_va_add(va, dwc(dev)->info.va_start, dwc(dev)->info.va_size);
+    }
+    if (flags & TU_BO_ALLOC_REPLAYABLE) {
+       if (client_iova) {
+@@ -497,19 +509,19 @@
+ {
+    if (*token) {
+       if (*mapping) {
+-         kern_return_t kr = IOConnectUnmapMemory64(dw.conn, *token, mach_task_self(), (mach_vm_address_t)(uintptr_t)*mapping);
++         kern_return_t kr = IOConnectUnmapMemory64(dwc(dev)->conn, *token, mach_task_self(), (mach_vm_address_t)(uintptr_t)*mapping);
+          if (kr != KERN_SUCCESS)
+             return retire->failure = vk_device_set_lost(&dev->vk, "deferred CPU unmap failed: 0x%x", kr);
+          *mapping = NULL;
+       }
+       NativeAdrenoAbiBoCpuUnmap undo = {.handle = handle, .token = *token};
+-      kern_return_t kr = dw_call(NativeAdrenoMethodBoCpuUnmap, &undo, sizeof(undo), NULL, 0);
++      kern_return_t kr = dw_call(dwc(dev), NativeAdrenoMethodBoCpuUnmap, &undo, sizeof(undo), NULL, 0);
+       if (kr != KERN_SUCCESS)
+          return retire->failure = vk_device_set_lost(&dev->vk, "deferred CPU lease release failed: 0x%x", kr);
+       *token = 0;
+    }
+    NativeAdrenoAbiBoFree release = {.handle = handle};
+-   kern_return_t kr = dw_call(NativeAdrenoMethodBoFree, &release, sizeof(release), NULL, 0);
++   kern_return_t kr = dw_call(dwc(dev), NativeAdrenoMethodBoFree, &release, sizeof(release), NULL, 0);
+    if (kr == kIOReturnBusy)
+       return VK_NOT_READY;
+    if (kr != KERN_SUCCESS)
+@@ -722,7 +734,7 @@
+                    uint64_t size, kern_return_t map_error, bool own_iova = true)
+ {
+    NativeAdrenoAbiBoFree release = {.handle = handle};
+-   kern_return_t cleanup = dw_call(NativeAdrenoMethodBoFree, &release, sizeof(release), NULL, 0);
++   kern_return_t cleanup = dw_call(dwc(dev), NativeAdrenoMethodBoFree, &release, sizeof(release), NULL, 0);
+    if (cleanup == KERN_SUCCESS) {
+       if (own_iova)   /* a lazy BO's range is its sparse VMA's, which frees it */
+          darwin_free_iova(dev, iova, size);
+@@ -800,7 +812,7 @@
+ 
+       NativeAdrenoAbiBoAlloc alloc = {.bytes = alloc_size, .align_log2 = 12, .contiguous = 0};
+       NativeAdrenoAbiBoAllocReply reply = {};
+-      kern_return_t kr = dw_call(NativeAdrenoMethodBoAlloc, &alloc, sizeof(alloc), &reply, sizeof(reply));
++      kern_return_t kr = dw_call(dwc(dev), NativeAdrenoMethodBoAlloc, &alloc, sizeof(alloc), &reply, sizeof(reply));
+       if (kr != KERN_SUCCESS) {
+          if (!lazy_vma)
+             darwin_free_iova(dev, iova, alloc_size);
+@@ -823,7 +835,7 @@
+          .shareability = 2,
+       };
+       NativeAdrenoAbiBoMapReply mapped = {};
+-      kr = dw_call(NativeAdrenoMethodBoMap, &map, sizeof(map), &mapped, sizeof(mapped));
++      kr = dw_call(dwc(dev), NativeAdrenoMethodBoMap, &map, sizeof(map), &mapped, sizeof(mapped));
+       if (kr != KERN_SUCCESS) {
+          return darwin_map_failure(dev, reply.handle, iova, alloc_size, kr, !lazy_vma);
+       }
+@@ -876,7 +888,7 @@
+ static VkResult
+ darwin_bo_init_host(struct tu_device *dev, struct tu_bo **out_bo, void *pointer, uint64_t size)
+ {
+-   if (!(dw.params.flags & NativeAdrenoParamsHostImport))
++   if (!(dwc(dev)->params.flags & NativeAdrenoParamsHostImport))
+       return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+    VkResult collected = darwin_collect_retired(dev);
+    if (collected != VK_SUCCESS)
+@@ -888,14 +900,14 @@
+ 
+    NativeAdrenoAbiBoImport import = {.address = (uint64_t)(uintptr_t)pointer, .bytes = size};
+    NativeAdrenoAbiBoAllocReply reply = {};
+-   kern_return_t kr = dw_call(NativeAdrenoMethodBoImport, &import, sizeof(import), &reply, sizeof(reply));
++   kern_return_t kr = dw_call(dwc(dev), NativeAdrenoMethodBoImport, &import, sizeof(import), &reply, sizeof(reply));
+    if (kr != KERN_SUCCESS) {
+       darwin_free_iova(dev, iova, size);
+       return vk_errorf(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE, "BoImport failed: 0x%x", kr);
+    }
+    NativeAdrenoAbiBoMap map = {.handle = reply.handle, .iova = iova, .permissions = 3u, .writeback = 0, .shareability = 2};
+    NativeAdrenoAbiBoMapReply mapped = {};
+-   kr = dw_call(NativeAdrenoMethodBoMap, &map, sizeof(map), &mapped, sizeof(mapped));
++   kr = dw_call(dwc(dev), NativeAdrenoMethodBoMap, &map, sizeof(map), &mapped, sizeof(mapped));
+    if (kr != KERN_SUCCESS) {
+       return darwin_map_failure(dev, reply.handle, iova, size, kr);
+    }
+@@ -940,7 +952,7 @@
+ {
+    NativeAdrenoAbiBoCpuMap req = {.handle = bo->darwin_handle};
+    NativeAdrenoAbiBoCpuMapReply reply = {};
+-   kern_return_t kr = dw_call(NativeAdrenoMethodBoCpuMap, &req, sizeof(req), &reply, sizeof(reply));
++   kern_return_t kr = dw_call(dwc(dev), NativeAdrenoMethodBoCpuMap, &req, sizeof(req), &reply, sizeof(reply));
+    if (kr != KERN_SUCCESS)
+       return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED, "BoCpuMap failed: 0x%x", kr);
+ 
+@@ -952,11 +964,11 @@
+    /* With IO-coherent BOs (the kernel reports NativeAdrenoParamsOwnedCoherent) the GPU maps the pages write-back inner-shareable, so the CPU
+     * view is a write-back one too: a write-combined view of a page the GPU snoops and the kernel's cacheable alias would disagree. */
+    uint32_t options = (placed_addr ? 0 : kIOMapAnywhere) |
+-                      ((dw.params.flags & 2u /* NativeAdrenoParamsOwnedCoherent: Adreno740 only, never set by Adreno650 */) ? kIOMapCopybackCache : kIOMapWriteCombineCache);
+-   kr = IOConnectMapMemory64(dw.conn, reply.token, mach_task_self(), &address, &length, options);
++                      ((dwc(dev)->params.flags & 2u /* NativeAdrenoParamsOwnedCoherent: Adreno740 only, never set by Adreno650 */) ? kIOMapCopybackCache : kIOMapWriteCombineCache);
++   kr = IOConnectMapMemory64(dwc(dev)->conn, reply.token, mach_task_self(), &address, &length, options);
+    if (kr != KERN_SUCCESS || !address || length < bo->size) {
+       NativeAdrenoAbiBoCpuUnmap undo = {.handle = bo->darwin_handle, .token = reply.token};
+-      dw_call(NativeAdrenoMethodBoCpuUnmap, &undo, sizeof(undo), NULL, 0);
++      dw_call(dwc(dev), NativeAdrenoMethodBoCpuUnmap, &undo, sizeof(undo), NULL, 0);
+       return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED, "IOConnectMapMemory64 failed: 0x%x", kr);
+    }
+ 
+@@ -981,7 +993,7 @@
+       return;
+    NativeAdrenoAbiMetadata req = {.handle = bo->darwin_handle, .bytes = metadata_size};
+    memcpy(req.text, metadata, metadata_size);
+-   dw_call(NativeAdrenoMethodSetMetadata, &req, sizeof(req), NULL, 0);
++   dw_call(dwc(dev), NativeAdrenoMethodSetMetadata, &req, sizeof(req), NULL, 0);
+ }
+ 
+ static int
+@@ -991,7 +1003,7 @@
+    NativeAdrenoAbiMetadata req = {.handle = bo->darwin_handle,
+                                   .bytes = MIN2(metadata_size, NativeAdrenoAbiMetadataBytes)};
+    NativeAdrenoAbiMetadata reply = {};
+-   if (dw_call(NativeAdrenoMethodGetMetadata, &req, sizeof(req), &reply, sizeof(reply)) != KERN_SUCCESS)
++   if (dw_call(dwc(dev), NativeAdrenoMethodGetMetadata, &req, sizeof(req), &reply, sizeof(reply)) != KERN_SUCCESS)
+       return -1;
+    memcpy(metadata, reply.text, MIN2(reply.bytes, metadata_size));
+    return 0;
+@@ -1002,9 +1014,9 @@
+ static VkResult
+ darwin_wait_idle(struct tu_device *dev)
+ {
+-   pthread_mutex_lock(&dw.lock);
+-   uint32_t last = dw.last_fence;
+-   pthread_mutex_unlock(&dw.lock);
++   pthread_mutex_lock(&dwc(dev)->lock);
++   uint32_t last = dwc(dev)->last_fence;
++   pthread_mutex_unlock(&dwc(dev)->lock);
+    if (last)
+       return dw_wait_fence_locked_free(dev, last, UINT64_MAX);   /* the kernel's hangcheck ends a hang */
+    return VK_SUCCESS;
+@@ -1046,9 +1058,9 @@
+       }
+    }
+    if (retire->count < retire->capacity) {
+-      pthread_mutex_lock(&dw.lock);
+-      uint32_t fence = dw.last_fence;
+-      pthread_mutex_unlock(&dw.lock);
++      pthread_mutex_lock(&dwc(dev)->lock);
++      uint32_t fence = dwc(dev)->last_fence;
++      pthread_mutex_unlock(&dwc(dev)->lock);
+       unsigned slot = (retire->head + retire->count) % retire->capacity;
+       retire->entries[slot] = {bo->darwin_handle, bo->iova, bo->darwin_alloc_size ? bo->darwin_alloc_size : bo->size, bo->map,
+                                bo->darwin_token, fence, bo->darwin_alloc_size != 0, bo->darwin_read_only};
+@@ -1273,14 +1285,14 @@
+ };
+ 
+ static void
+-darwin_note_fence(uint32_t fence)
++darwin_note_fence(struct darwin_conn *c, uint32_t fence)
+ {
+-   if (dw.inflight_count == 8) {
+-      memmove(dw.inflight, dw.inflight + 1, 7 * sizeof(dw.inflight[0]));
+-      dw.inflight_count = 7;
++   if (c->inflight_count == 8) {
++      memmove(c->inflight, c->inflight + 1, 7 * sizeof(c->inflight[0]));
++      c->inflight_count = 7;
+    }
+-   dw.inflight[dw.inflight_count++] = fence;
+-   dw.last_fence = fence;
++   c->inflight[c->inflight_count++] = fence;
++   c->last_fence = fence;
+ }
+ 
+ /* One kernel submission of up to NativeAdrenoAbiMaxBuffers indirect buffers; while the kernel's ring has no room (kIOReturnBusy, as msm
+@@ -1298,7 +1310,7 @@
+ 
+    for (;;) {
+       NativeAdrenoAbiSubmitReply reply = {};
+-      kern_return_t kr = dw_call(NativeAdrenoMethodSubmit, &req, sizeof(req), &reply, sizeof(reply));
++      kern_return_t kr = dw_call(dwc(dev), NativeAdrenoMethodSubmit, &req, sizeof(req), &reply, sizeof(reply));
+       if (kr == KERN_SUCCESS) {
+          *fence = (uint32_t)reply.fence;
+          return VK_SUCCESS;
+@@ -1306,9 +1318,9 @@
+       if (kr != kIOReturnBusy)
+          return vk_device_set_lost(&dev->vk, "submit failed: 0x%x", kr);
+ 
+-      pthread_mutex_lock(&dw.lock);
+-      uint32_t oldest = dw.inflight_count ? dw.inflight[0] : 0;
+-      pthread_mutex_unlock(&dw.lock);
++      pthread_mutex_lock(&dwc(dev)->lock);
++      uint32_t oldest = dwc(dev)->inflight_count ? dwc(dev)->inflight[0] : 0;
++      pthread_mutex_unlock(&dwc(dev)->lock);
+       if (!oldest)
+          sched_yield();
+       else if (dw_wait_fence_locked_free(dev, oldest, UINT64_MAX) != VK_SUCCESS)
+@@ -1348,9 +1360,9 @@
+          VkResult result = darwin_submit_chunk(queue, all + at, count, &chunk_fence);
+          if (result != VK_SUCCESS)
+             return result;
+-         pthread_mutex_lock(&dw.lock);
+-         darwin_note_fence(chunk_fence);
+-         pthread_mutex_unlock(&dw.lock);
++         pthread_mutex_lock(&dwc(dev)->lock);
++         darwin_note_fence(dwc(dev), chunk_fence);
++         pthread_mutex_unlock(&dwc(dev)->lock);
+          fence = chunk_fence;
+       }
+       p_atomic_set(&queue->fence, fence);
+@@ -1376,23 +1388,27 @@
+ darwin_device_init(struct tu_device *dev)
+ {
+    dev->fd = -1;
+-   /* The enumeration probe closed its connection; take the single slot for this device. */
+-   if (!dw.open) {
+-      VkResult result = dw_open_connection(dev->physical_device->instance);
+-      if (result != VK_SUCCESS)
+-         return result;
+-   }
+    struct darwin_retire_state *retire = (struct darwin_retire_state *)
+       vk_zalloc(&dev->vk.alloc, sizeof(*retire), 8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+-   if (!retire) {
+-      dw_close_connection();
++   if (!retire)
+       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+-   }
+    if (pthread_mutex_init(&retire->lock, NULL)) {
+       vk_free(&dev->vk.alloc, retire);
+-      dw_close_connection();
+       return vk_error(dev, VK_ERROR_INITIALIZATION_FAILED);
+    }
++   if (pthread_mutex_init(&retire->conn.lock, NULL)) {
++      pthread_mutex_destroy(&retire->lock);
++      vk_free(&dev->vk.alloc, retire);
++      return vk_error(dev, VK_ERROR_INITIALIZATION_FAILED);
++   }
++   /* This device's own connection: its own client slot, handle namespace and GPU window. */
++   VkResult result = dw_open_connection(&retire->conn, dev->physical_device->instance);
++   if (result != VK_SUCCESS) {
++      pthread_mutex_destroy(&retire->conn.lock);
++      pthread_mutex_destroy(&retire->lock);
++      vk_free(&dev->vk.alloc, retire);
++      return result;
++   }
+    dev->darwin_retire = retire;
+    darwin_stats_state = retire;
+    darwin_watch_memory_pressure();
+@@ -1404,9 +1420,10 @@
+ darwin_device_finish(struct tu_device *dev)
+ {
+    /* Closing the connection makes the kernel drain the GPU and free every object this client created. */
+-   dw_close_connection();
+    struct darwin_retire_state *retire = (struct darwin_retire_state *)dev->darwin_retire;
+    if (retire) {
++      dw_close_connection(&retire->conn);
++      pthread_mutex_destroy(&retire->conn.lock);
+       /* Some CreateDevice failure paths already destroyed the VMA heap/mutex.
+        * Never return ranges here: they are either gone or about to be destroyed. */
+       if (debug_get_bool_option("TU_DARWIN_RETIRE_TRACE", false))
+@@ -1415,7 +1432,8 @@
+                    retire->count, (unsigned long long)retire->pressure_waits);
+       if (retire->cache_stats.lookups)
+          darwin_cache_log(retire);
+-      darwin_stats_state = NULL;
++      if (darwin_stats_state == retire)
++         darwin_stats_state = NULL;
+       rb_tree_foreach_safe(struct darwin_va_hole, hole, &retire->va.address, by_address)
+          free(hole);
+       pthread_mutex_destroy(&retire->lock);
+@@ -1430,7 +1448,7 @@
+ darwin_device_get_gpu_timestamp(struct tu_device *dev, uint64_t *ts)
+ {
+    NativeAdrenoAbiTimestamp reply = {};
+-   if (dw_call(NativeAdrenoMethodGetTimestamp, NULL, 0, &reply, sizeof(reply)) != KERN_SUCCESS)
++   if (dw_call(dwc(dev), NativeAdrenoMethodGetTimestamp, NULL, 0, &reply, sizeof(reply)) != KERN_SUCCESS)
+       return -1;
+    *ts = reply.ticks;
+    return 0;
+@@ -1440,7 +1458,7 @@
+ darwin_device_get_suspend_count(struct tu_device *dev, uint64_t *suspend_count)
+ {
+    NativeAdrenoAbiStatus reply = {};
+-   if (dw_call(NativeAdrenoMethodGetStatus, NULL, 0, &reply, sizeof(reply)) != KERN_SUCCESS)
++   if (dw_call(dwc(dev), NativeAdrenoMethodGetStatus, NULL, 0, &reply, sizeof(reply)) != KERN_SUCCESS)
+       *suspend_count = 0;
+    else
+       *suspend_count = reply.suspends;
+@@ -1451,7 +1469,7 @@
+ darwin_device_check_status(struct tu_device *device)
+ {
+    NativeAdrenoAbiStatus reply = {};
+-   kern_return_t kr = dw_call(NativeAdrenoMethodGetStatus, NULL, 0, &reply, sizeof(reply));
++   kern_return_t kr = dw_call(dwc(device), NativeAdrenoMethodGetStatus, NULL, 0, &reply, sizeof(reply));
+    if (kr == kIOReturnUnsupported)
+       return VK_SUCCESS; /* counters not attached in this kernel */
+    if (kr != KERN_SUCCESS)
+@@ -1532,7 +1550,7 @@
+       return vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED, "I can't KHR_display");
+    }
+ 
+-   VkResult result = dw_open_connection(instance);
++   VkResult result = dw_open_connection(&dw, instance);
+    if (result != VK_SUCCESS) {
+       if (result != VK_ERROR_INCOMPATIBLE_DRIVER)
+          mesa_loge("NativeAdreno: could not open the kernel client (%d)", result);
+@@ -1542,7 +1560,7 @@
+    struct tu_physical_device *device = (struct tu_physical_device *)
+       vk_zalloc(&instance->vk.alloc, sizeof(*device), 8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
+    if (!device) {
+-      dw_close_connection();
++      dw_close_connection(&dw);
+       return vk_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+    }
+ 
+@@ -1596,8 +1614,8 @@
+    instance->knl = &darwin_knl_funcs;
+ 
+    result = tu_physical_device_init(device, instance);
+-   /* The enumeration probe only needed the facts; the device takes the slot again in device_init. */
+-   dw_close_connection();
++   /* The enumeration probe only needed the facts; each device opens its own connection in device_init. */
++   dw_close_connection(&dw);
+    if (result != VK_SUCCESS) {
+       mesa_loge("NativeAdreno: tu_physical_device_init failed (%d)", result);
+       vk_free(&instance->vk.alloc, device);
