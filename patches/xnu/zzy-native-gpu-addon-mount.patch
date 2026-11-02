@@ -184,7 +184,7 @@ index a5ff474..4704203 100644
 +{
 +	char parent[192];
 +	strlcpy(parent, path, sizeof(parent));
-+	for (size_t i = sizeof("/private/var/ngpu/") - 1; parent[i]; ++i) {
++	for (size_t i = sizeof("/private/var/") - 1; parent[i]; ++i) {   /* /private/var/ngpu itself too */
 +		if (parent[i] != '/') {
 +			continue;
 +		}
