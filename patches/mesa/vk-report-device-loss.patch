@@ -1,0 +1,33 @@
+diff --git a/src/vulkan/runtime/vk_device.c b/src/vulkan/runtime/vk_device.c
+index 1b422dc..a03bc78 100644
+--- a/src/vulkan/runtime/vk_device.c
++++ b/src/vulkan/runtime/vk_device.c
+@@ -436,6 +436,15 @@ _vk_device_set_lost(struct vk_device *device,
+ 
+    va_list ap;
+    va_start(ap, msg);
++   /* The reason, now, on stderr: a release build reports it only through the debug-utils messengers, which no Metal client installs. */
++   {
++      char reason[256];
++      va_list copy;
++      va_copy(copy, ap);
++      vsnprintf(reason, sizeof(reason), msg, copy);
++      va_end(copy);
++      fprintf(stderr, "vk: device lost at %s:%d: %s\n", file, line, reason);
++   }
+    __vk_errorv(device, VK_ERROR_DEVICE_LOST, file, line, msg, ap);
+    va_end(ap);
+ 
+diff --git a/src/vulkan/runtime/vk_queue.c b/src/vulkan/runtime/vk_queue.c
+index b6b8ba7..55b2ca5 100644
+--- a/src/vulkan/runtime/vk_queue.c
++++ b/src/vulkan/runtime/vk_queue.c
+@@ -127,6 +127,8 @@ _vk_queue_set_lost(struct vk_queue *queue,
+    va_start(ap, msg);
+    vsnprintf(queue->_lost.error_msg, sizeof(queue->_lost.error_msg), msg, ap);
+    va_end(ap);
++   /* The reason, now, on stderr: a release build reports it only through the debug-utils messengers, which no Metal client installs. */
++   fprintf(stderr, "vk: queue lost at %s:%d: %s\n", file, line, queue->_lost.error_msg);
+ 
+    p_atomic_inc(&queue->base.device->_lost.lost);
+ 
