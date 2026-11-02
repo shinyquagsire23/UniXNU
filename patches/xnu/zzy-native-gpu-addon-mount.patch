@@ -2,7 +2,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 index a5ff474..4704203 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -7193,6 +7193,321 @@ uint64_t native_owner_data_seed_base, native_owner_data_seed_size;
+@@ -7193,6 +7193,336 @@ uint64_t native_owner_data_seed_base, native_owner_data_seed_size;
  uint8_t native_owner_data_seed_sha256[32];
  char native_owner_data_device_path[64];
  
@@ -143,7 +143,7 @@ index a5ff474..4704203 100644
 +	return equal;
 +}
 +static int
-+native_gpu_addon_write(const char *path, const uint8_t *data, uint64_t size, uint32_t mode, vfs_context_t ctx)
++native_gpu_addon_write(const char *path, const uint8_t *data, uint64_t size, uint32_t mode, int owner, vfs_context_t ctx)
 +{
 +	vnode_t vp = NULLVP;
 +	int error = vnode_open(path, FREAD | O_NOFOLLOW, 0, 0, &vp, ctx);
@@ -169,6 +169,10 @@ index a5ff474..4704203 100644
 +		struct vnode_attr va;
 +		VATTR_INIT(&va);
 +		VATTR_SET(&va, va_mode, mode);
++		if (owner >= 0) {
++			VATTR_SET(&va, va_uid, (uid_t)owner);
++			VATTR_SET(&va, va_gid, (gid_t)owner);
++		}
 +		error = vnode_setattr(vp, &va, ctx);
 +	}
 +	if (!error) {
@@ -269,13 +273,24 @@ index a5ff474..4704203 100644
 +		at += 24;
 +		const char *name = (const char *)(addon + at);
 +		at += (name_bytes + 7) & ~7ULL;
-+		snprintf(path, sizeof(path), "/private/var/ngpu/%s", name);
++		/* Two prefixes leave /private/var/ngpu: preferences the render server reads when it starts, before any plugin code runs (it
++		 * picks a 10-bit deep framebuffer unless told not to, which the legacy display does not accept), for its user mobile (owned by
++		 * mobile, 501) and for root. Everything else lands below /private/var/ngpu. */
++		int owner = -1;
++		if (!strncmp(name, "prefs-mobile/", 13)) {
++			snprintf(path, sizeof(path), "/private/var/mobile/Library/Preferences/%s", name + 13);
++			owner = 501;
++		} else if (!strncmp(name, "prefs-root/", 11)) {
++			snprintf(path, sizeof(path), "/private/var/root/Library/Preferences/%s", name + 11);
++		} else {
++			snprintf(path, sizeof(path), "/private/var/ngpu/%s", name);
++		}
 +		uint8_t *data = kalloc_data(size ? size : 1, Z_WAITOK);
 +		int error = data ? native_gpu_addon_inflate(addon + at, packed, data, size) : ENOMEM;
 +		if (!error) {
-+			error = native_gpu_addon_write(path, data, size, mode, ctx);
++			error = native_gpu_addon_write(path, data, size, mode, owner, ctx);
 +			if (error == ENOENT && !(error = native_gpu_addon_parents(p, scratch, path))) {
-+				error = native_gpu_addon_write(path, data, size, mode, ctx);
++				error = native_gpu_addon_write(path, data, size, mode, owner, ctx);
 +			}
 +		}
 +		if (data) {
@@ -324,7 +339,7 @@ index a5ff474..4704203 100644
  static int
  native_owner_data_prepare(proc_t p, user_addr_t scratch)
  {
-@@ -7251,6 +7566,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+@@ -7251,6 +7581,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
  	if (actual != device || (vfs_flags(data_mount) & MNT_RDONLY) ||
  	    strcmp(vfs_statfs(data_mount)->f_fstypename, "apfs")) error = EINVAL;
  	if (!error) native_owner_data_stage = 4;

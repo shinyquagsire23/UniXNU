@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Pack the owner-built Adreno Metal plugin into a GPU addon file for the boot payload.
 
-  make-gpu-addon.py [--publish] [--selftest] [--clients NAME,...] [--wallpaper DIR] [--prime-list FILE] OUTPUT
+  make-gpu-addon.py [--publish] [--selftest] [--ca-prefs] [--clients NAME,...] [--wallpaper DIR] [--prime-list FILE] OUTPUT
 
 The files are the ones add-gpu-plugin-data.py stages into a Data seed, with the same paths below /private/var/ngpu and the same modes:
 addons/NativeAdrenoMetal.bundle/*, addons/NativeAdrenoMetal.publish (--publish), addons/NativeAdrenoMetal.selftest (--selftest: the plugin's once-per-process
 on-device self-test, NativeAdrenoMetalPlugin.mm), addons/NativeAdrenoMetal.clients (--clients),
+prefs-mobile/backboardd.plist and prefs-root/backboardd.plist (--ca-prefs: the render server's Core Animation preferences
+add-gpu-plugin-data.py writes into a seed, no deep framebuffer and no compression; the kernel writes the two prefixes to
+/private/var/{mobile,root}/Library/Preferences),
 bin/adrenoprobed and daemons/*.plist. --wallpaper adds the files of DIR (scripts/make-wallpaper-overlay.py) as wallpaper/*, which the
 kernel mounts over the default wallpaper's layered animation. --prime-list adds FILE (the absolute paths of the OS image's .metallib
 files, one per line) as addons/NativeAdrenoMetal.primelist, the libraries the render server compiles ahead (PrimeShaders.h). The payload carries the file next to the kernel (unixnu build payload --gpu-addon), the loader
@@ -33,7 +36,8 @@ def pad(data):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if a not in ('--publish', '--selftest')]
+    args = [a for a in sys.argv[1:] if a not in ('--publish', '--selftest', '--ca-prefs')]
+    ca_prefs = '--ca-prefs' in sys.argv[1:]
     publish = '--publish' in sys.argv[1:]
     selftest = '--selftest' in sys.argv[1:]
     clients = None
@@ -73,6 +77,13 @@ def main():
         files.append(('addons/NativeAdrenoMetal.publish', 0o644, b'1\n'))
     if selftest:
         files.append(('addons/NativeAdrenoMetal.selftest', 0o644, b'1\n'))
+    if ca_prefs:
+        # backboardd picks a 10-bit deep framebuffer unless told not to and reads this when it starts, before the plugin can act
+        import plistlib
+        values = plistlib.dumps({'CAEnableDeepFramebuffer': False, 'CAEnableFramebufferCompression': False,
+                                 'CAEnableIOSurfaceCompression': False}, fmt=plistlib.FMT_BINARY)
+        files.append(('prefs-mobile/backboardd.plist', 0o644, values))
+        files.append(('prefs-root/backboardd.plist', 0o644, values))
     if clients:
         files.append(('addons/NativeAdrenoMetal.clients', 0o644, ('\n'.join(clients) + '\n').encode()))
     if prime_list:
