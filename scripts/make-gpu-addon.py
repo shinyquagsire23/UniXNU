@@ -177,6 +177,9 @@ def main():
         # lsrebuild: the forwarder removes the LaunchServices database once and stops lsd, which rebuilds it (OsLogConsole.mm)
         if (oslog / 'lsrebuild').is_file():
             files.append(('oslog/lsrebuild', 0o644, (oslog / 'lsrebuild').read_bytes()))
+        # systemapps: the forwarder runs SystemAppMigrator once, installing the staged deletable system apps (OsLogConsole.mm)
+        if (oslog / 'systemapps').is_file():
+            files.append(('oslog/systemapps', 0o644, (oslog / 'systemapps').read_bytes()))
         # The unified log's system preferences with private data on: the kernel overlays logging/ on /Library/Preferences/Logging
         # (zzy-zoslog-addon-mount mount7), so the forwarded lines carry what logd otherwise redacts as <private>.
         import plistlib
