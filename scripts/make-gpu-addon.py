@@ -173,6 +173,9 @@ def main():
         files.append(('usrbin/IOMFB_FDR_Loader', 0o755, (oslog / 'IOMFB_FDR_Loader').read_bytes()))
         if (oslog / 'filter.txt').is_file():
             files.append(('oslog/filter.txt', 0o644, (oslog / 'filter.txt').read_bytes()))
+        # lsrebuild: the forwarder removes the LaunchServices database once and stops lsd, which rebuilds it (OsLogConsole.mm)
+        if (oslog / 'lsrebuild').is_file():
+            files.append(('oslog/lsrebuild', 0o644, (oslog / 'lsrebuild').read_bytes()))
         # The unified log's system preferences with private data on: the kernel overlays logging/ on /Library/Preferences/Logging
         # (zzy-zoslog-addon-mount mount7), so the forwarded lines carry what logd otherwise redacts as <private>.
         import plistlib
