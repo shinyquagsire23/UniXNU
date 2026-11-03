@@ -1,0 +1,30 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7229,6 +7229,12 @@
+ volatile int native_gpu_addon6_status = -1;
+ volatile int native_gpu_addon7_stage = 0;
+ volatile int native_gpu_addon7_status = -1;
++/* mount8: the OS cryptex's SystemVersion.plist at /private/preboot/Cryptexes/OS, where cryptexd would mount the cryptex. LaunchServices
++ * registers the cryptex's content (WebKit's WebContent, GPU and Networking extensions, reached through the /System/Cryptexes overlay) only
++ * when the cryptex version it reads there differs from the one its database was seeded with; with no file both are zero, nothing is
++ * registered and MobileSafari's web processes fail to launch with OSStatus -10814 (pdx203 usb-130). */
++volatile int native_gpu_addon8_stage = 0;
++volatile int native_gpu_addon8_status = -1;
+ /* Executables reached through the App cryptex overlay (the bindfs mount on /System/Cryptexes, mount4 below): their code is checked
+  * against the boot trust cache like any other, but AMFI's launch constraints (on-authorized-authapfs-volume and the category it gives
+  * these Apple programs, c[8] even with an owner trust entry of category 0) can never match a file on owner Data, so every Safari service
+@@ -7609,8 +7615,12 @@
+ 	native_gpu_addon_mount(p, scratch, 0xe40, logging_source, sizeof(logging_source), logging_point, sizeof(logging_point),
+ 	    "/Library/Preferences/Logging/Subsystems", "/Library/Preferences/Logging/com.apple.system.logging.plist", &native_gpu_addon7_stage,
+ 	    &native_gpu_addon7_status);
+-	printf("GPUADDON mount6 (usr/bin) %d/%d mount7 (logging prefs) %d/%d\n", native_gpu_addon6_stage, native_gpu_addon6_status,
+-	    native_gpu_addon7_stage, native_gpu_addon7_status);
++	/* The OS cryptex's version for LaunchServices (native_gpu_addon8_stage). Scratch slot 0xe80: type 0xe80, path 0xea0, data 0xf80. */
++	static const char preboot_source[] = "/private/var/ngpu/pbcx", preboot_point[] = "/private/preboot/Cryptexes";
++	native_gpu_addon_mount(p, scratch, 0xe80, preboot_source, sizeof(preboot_source), preboot_point, sizeof(preboot_point),
++	    "/private/preboot/Cryptexes", "/private/preboot/Cryptexes/OS/SystemVersion.plist", &native_gpu_addon8_stage, &native_gpu_addon8_status);
++	printf("GPUADDON mount6 (usr/bin) %d/%d mount7 (logging prefs) %d/%d mount8 (preboot cryptex version) %d/%d\n", native_gpu_addon6_stage,
++	    native_gpu_addon6_status, native_gpu_addon7_stage, native_gpu_addon7_status, native_gpu_addon8_stage, native_gpu_addon8_status);
+ }
+ 
+ /* The deletable system apps (Weather, Notes, Calendar, ...) ship in the OS volume's /private/var/staged_system_apps. A restore copies
