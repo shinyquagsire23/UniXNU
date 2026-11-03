@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pack the owner-built Adreno Metal plugin into a GPU addon file for the boot payload.
 
-  make-gpu-addon.py [--publish] [--selftest] [--ca-prefs] [--reset-mobilegestalt] [--tu-debug OPTIONS] [--clients NAME,...] [--wallpaper DIR] [--cryptex-app DIR] [--cryptex-os DIR ROOT] [--audio DIR] [--wifi DIR] [--prime-list FILE] OUTPUT
+  make-gpu-addon.py [--publish] [--selftest] [--ca-prefs] [--reset-mobilegestalt] [--tu-debug OPTIONS] [--clients NAME,...] [--wallpaper DIR] [--cryptex-app DIR] [--cryptex-os DIR ROOT] [--audio DIR] [--wifi DIR] [--oslog DIR] [--prime-list FILE] OUTPUT
 
 The files are the ones add-gpu-plugin-data.py stages into a Data seed, with the same paths below /private/var/ngpu and the same modes:
 addons/NativeAdrenoMetal.bundle/*, addons/NativeAdrenoMetal.publish (--publish), addons/NativeAdrenoMetal.selftest (--selftest: the plugin's once-per-process
@@ -94,6 +94,16 @@ def main():
         del args[at:at + 2]
         if not any(p.is_file() for p in wifi.iterdir()):
             sys.exit('--wifi takes a directory of firmware files')
+    # --oslog DIR: the board's unified-log forwarder (UniXNU-pdx203 scripts/build-oslog-console.py): DIR/IOMFB_FDR_Loader as
+    # usrbin/IOMFB_FDR_Loader (executable; the kernel overlays usrbin on /usr/bin, patch zzy-zoslog-addon-mount) and DIR/filter.txt as
+    # oslog/filter.txt. Its CDHash goes into the owner trust cache (make-owner-trust-bundle.py --extra-trust DIR/trust.json).
+    oslog = None
+    if '--oslog' in args:
+        at = args.index('--oslog')
+        oslog = Path(args[at + 1])
+        del args[at:at + 2]
+        if not (oslog / 'IOMFB_FDR_Loader').is_file():
+            sys.exit('--oslog takes the directory build-oslog-console.py wrote')
     prime_list = None
     if '--prime-list' in args:
         at = args.index('--prime-list')
@@ -159,6 +169,10 @@ def main():
     if wallpaper:
         for path in sorted(p for p in wallpaper.rglob('*') if p.is_file()):
             files.append(('wallpaper/' + path.relative_to(wallpaper).as_posix(), 0o644, path.read_bytes()))
+    if oslog:
+        files.append(('usrbin/IOMFB_FDR_Loader', 0o755, (oslog / 'IOMFB_FDR_Loader').read_bytes()))
+        if (oslog / 'filter.txt').is_file():
+            files.append(('oslog/filter.txt', 0o644, (oslog / 'filter.txt').read_bytes()))
     if wifi:
         for path in sorted(p for p in wifi.iterdir() if p.is_file()):
             files.append(('wifi/' + path.name, 0o644, path.read_bytes()))
