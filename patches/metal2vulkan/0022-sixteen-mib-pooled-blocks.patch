@@ -1,0 +1,20 @@
+diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -63,8 +63,14 @@
+ use std::sync::{Arc, Mutex};
+ use std::time::{Duration, Instant};
+ 
+-/// The size of a pooled block, at most the device's `maxMemoryAllocationSize`.
+-pub(super) const BLOCK_BYTES: u64 = 64 << 20;
++/// The size of a pooled block, at most the device's `maxMemoryAllocationSize`. pdx203: 16 MiB,
++/// not 64. The render server's GPU memory is a 768 MiB pool the boot loader reserves and a 1 GiB
++/// address window, both shared with Turnip's own buffers. As apps opened (usb-144) its pooled
++/// blocks held 448 MiB with 215 placed and 80 MiB more kept empty, while every block a pool made
++/// was 64 MiB and every buffer up to 32 MiB shared one; the window filled and Turnip wrote a
++/// command stream that could not grow past its end. Past half of a 16 MiB block a buffer takes
++/// memory of its own size, and a pool's slack and kept empty blocks are a quarter as large.
++pub(super) const BLOCK_BYTES: u64 = 16 << 20;
+ 
+ /// The most empty pooled blocks a pool keeps for its next placements ([`Pool::release`]), at
+ /// most 128 MiB of empty memory a pool. In a pool the encodings place in, one of them is mostly

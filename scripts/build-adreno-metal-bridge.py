@@ -55,7 +55,9 @@ PATCHES = [ROOT / 'drivers/NativeMetal/bridge/patches' / name for name in [
     '0020-written-host-page-textures-in-place-at-any-size.patch',
     # pdx203: where a device loss was recorded and the Vulkan result of a failed submission or wait, on stderr (the plugin forwards
     # such lines of a client process to the kernel): SpringBoard's device was lost with no kernel call failing and no Turnip line.
-    '0021-report-device-losses.patch']]
+    '0021-report-device-losses.patch']] + [
+    # The fork's own, after the module's (patches/metal2vulkan): 16 MiB pooled blocks, for the render server's 768 MiB pool and 1 GiB window.
+    ROOT / 'patches/metal2vulkan' / name for name in ['0022-sixteen-mib-pooled-blocks.patch']]
 
 
 def git_tree(*steps):

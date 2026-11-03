@@ -1,0 +1,228 @@
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index 33a22aa..5732b96 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -5398,6 +5398,15 @@ tu_EndCommandBuffer(VkCommandBuffer commandBuffer)
+    tu_cs_end(&cmd_buffer->draw_cs);
+    tu_cs_end(&cmd_buffer->draw_epilogue_cs);
+ 
++   /* pdx203: a stream that could not grow dropped packets (struct tu_cs's error): the command buffer fails rather than run them. */
++   const struct tu_cs *streams[] = {&cmd_buffer->cs, &cmd_buffer->draw_cs, &cmd_buffer->draw_epilogue_cs};
++   for (const struct tu_cs *stream : streams) {
++      if (stream->error) {
++         vk_command_buffer_set_error(&cmd_buffer->vk, stream->error);
++         break;
++      }
++   }
++
+    return vk_command_buffer_end(&cmd_buffer->vk);
+ }
+ TU_GENX(tu_EndCommandBuffer);
+diff --git a/src/freedreno/vulkan/tu_cs.cc b/src/freedreno/vulkan/tu_cs.cc
+index 47e1939..17cc77f 100644
+--- a/src/freedreno/vulkan/tu_cs.cc
++++ b/src/freedreno/vulkan/tu_cs.cc
+@@ -77,6 +77,54 @@ tu_cs_init_suballoc(struct tu_cs *cs, struct tu_device *device,
+ /**
+  * Finish and release all resources owned by a command stream.
+  */
++/* pdx203: host memory a failed stream's packets go to (struct tu_cs's error), a block at a time. */
++struct tu_cs_sink {
++   struct tu_cs_sink *prev;
++   uint32_t size;
++   uint32_t dwords[];
++};
++
++static void
++tu_cs_free_sink(struct tu_cs *cs)
++{
++   while (cs->sink) {
++      struct tu_cs_sink *prev = cs->sink->prev;
++      free(cs->sink);
++      cs->sink = prev;
++   }
++}
++
++void
++tu_cs_sink_reserve(struct tu_cs *cs, uint32_t reserved_size)
++{
++   /* Room for the packet and the CP_COND_REG_EXECs tu_cs_reserve_space adds for an open condition. */
++   const uint32_t need = reserved_size + 3 * TU_COND_EXEC_STACK_SIZE + 16;
++   if (!cs->sink || cs->sink->size < need) {
++      const uint32_t size = MAX2(need, 16384);
++      struct tu_cs_sink *sink = (struct tu_cs_sink *)
++         malloc(sizeof(struct tu_cs_sink) + size * sizeof(uint32_t));
++      if (!sink)
++         abort();
++      sink->prev = cs->sink;
++      sink->size = size;
++      cs->sink = sink;
++   }
++   cs->start = cs->cur = cs->sink->dwords;
++   cs->reserved_end = cs->cur + reserved_size;
++   cs->end = cs->sink->dwords + cs->sink->size;
++}
++
++void
++tu_cs_fail(struct tu_cs *cs, VkResult result, uint32_t reserved_size)
++{
++   if (!cs->error) {
++      cs->error = result;
++      mesa_loge("pdx203: command stream %s could not grow by %u dwords (VkResult %d): its packets are dropped and its command "
++                "buffer fails", cs->name ? cs->name : "?", reserved_size, (int) result);
++   }
++   tu_cs_sink_reserve(cs, reserved_size);
++}
++
+ void
+ tu_cs_finish(struct tu_cs *cs)
+ {
+@@ -96,6 +144,7 @@ tu_cs_finish(struct tu_cs *cs)
+    free(cs->entries);
+    free(cs->read_only.bos);
+    free(cs->read_write.bos);
++   tu_cs_free_sink(cs);
+ }
+ 
+ static struct tu_bo *
+@@ -128,6 +177,9 @@ tu_cs_get_offset(const struct tu_cs *cs)
+ uint64_t
+ tu_cs_get_cur_iova(const struct tu_cs *cs)
+ {
++   /* pdx203: a failed stream's packets are in the sink, which has no iova (and the stream may have no BO). */
++   if (cs->error)
++      return 0;
+    if (cs->mode == TU_CS_MODE_EXTERNAL)
+       return cs->external_iova + ((char *) cs->cur - (char *) cs->start);
+    return tu_cs_current_bo(cs)->iova + ((char *) cs->cur - (char *) tu_cs_current_bo(cs)->map);
+@@ -256,6 +308,10 @@ tu_cs_add_entries(struct tu_cs *cs, struct tu_cs *target)
+    assert(cs->mode == TU_CS_MODE_GROW);
+    assert(target->mode == TU_CS_MODE_GROW);
+ 
++   /* pdx203: a failed stream names no more entries (struct tu_cs's error). */
++   if (cs->error)
++      return cs->error;
++
+    if (!tu_cs_is_empty(cs))
+       tu_cs_add_entry(cs);
+ 
+@@ -289,6 +345,12 @@ tu_cs_end(struct tu_cs *cs)
+ {
+    assert(cs->mode != TU_CS_MODE_SUB_STREAM);
+ 
++   /* pdx203: a failed stream's packets since the failure are in the sink, which no entry may name. */
++   if (cs->error) {
++      cs->start = cs->cur;
++      return;
++   }
++
+    if (cs->mode == TU_CS_MODE_GROW && !tu_cs_is_empty(cs))
+       tu_cs_add_entry(cs);
+ }
+@@ -298,6 +360,13 @@ tu_cs_set_writeable(struct tu_cs *cs, bool writeable)
+ {
+    assert(cs->mode == TU_CS_MODE_GROW || cs->mode == TU_CS_MODE_SUB_STREAM);
+ 
++   if (cs->writeable != writeable && cs->error) {
++      /* pdx203: a failed stream stays in its sink, and no BO array keeps a pointer into it. */
++      cs->writeable = writeable;
++      tu_cs_sink_reserve(cs, 0);
++      return;
++   }
++
+    if (cs->writeable != writeable) {
+       assert(!cs->cond_stack_depth);
+       if (cs->mode == TU_CS_MODE_GROW && !tu_cs_is_empty(cs))
+@@ -436,6 +505,12 @@ tu_cs_end_sub_stream(struct tu_cs *cs, struct tu_cs *sub_cs)
+ VkResult
+ tu_cs_reserve_space(struct tu_cs *cs, uint32_t reserved_size)
+ {
++   /* pdx203: a failed stream stays in its sink (struct tu_cs's error). */
++   if (unlikely(cs->error)) {
++      tu_cs_sink_reserve(cs, reserved_size);
++      return cs->error;
++   }
++
+    if (tu_cs_get_space(cs) < reserved_size) {
+       if (cs->mode == TU_CS_MODE_EXTERNAL) {
+          UNREACHABLE("cannot grow external buffer");
+@@ -503,6 +578,14 @@ tu_cs_reserve_space(struct tu_cs *cs, uint32_t reserved_size)
+ void
+ tu_cs_reset(struct tu_cs *cs)
+ {
++   /* pdx203: a failed stream starts over in its BOs (or none), and the sink's blocks go. */
++   if (cs->error) {
++      cs->error = VK_SUCCESS;
++      cs->start = cs->cur = cs->reserved_end = cs->end = NULL;
++      cs->cond_stack_depth = 0;
++   }
++   tu_cs_free_sink(cs);
++
+    if (cs->mode == TU_CS_MODE_EXTERNAL) {
+       assert(!cs->read_only.bo_count && !cs->read_write.bo_count &&
+              !cs->refcount_bo && !cs->entry_count);
+diff --git a/src/freedreno/vulkan/tu_cs.h b/src/freedreno/vulkan/tu_cs.h
+index 6a66de1..e51fc78 100644
+--- a/src/freedreno/vulkan/tu_cs.h
++++ b/src/freedreno/vulkan/tu_cs.h
+@@ -82,6 +82,7 @@ struct tu_bo_array {
+ 
+ struct tu_pkt;
+ struct tu_crb;
++struct tu_cs_sink;
+ 
+ struct tu_cs
+ {
+@@ -117,6 +118,13 @@ struct tu_cs
+ 
+    tu_pkt *pkt;
+ 
++   /* pdx203: the first error growing this stream (a BO its next packets needed failed to be made or mapped, or an entry array to
++    * grow). The packets from then on go to host memory nothing submits (sink, which keeps every block it had until the stream is
++    * reset, as packets may hold pointers into them), and tu_EndCommandBuffer fails the command buffer with it. Before, the error
++    * was asserted away and the packets were written past the end of the last BO (r2d_coords in the render server, usb-131..143). */
++   VkResult error;
++   struct tu_cs_sink *sink;
++
+    tu_crb crb(uint32_t nregs);
+ };
+ 
+@@ -187,6 +195,14 @@ tu_cs_end_draw_state(struct tu_cs *cs, struct tu_cs *sub_cs)
+ VkResult
+ tu_cs_reserve_space(struct tu_cs *cs, uint32_t reserved_size);
+ 
++/* pdx203: record a failure to grow the stream and continue its packets in the sink (struct tu_cs's error). */
++void
++tu_cs_fail(struct tu_cs *cs, VkResult result, uint32_t reserved_size);
++
++/* pdx203: rewind a failed stream's packets to the start of a sink block with room for reserved_size dwords. */
++void
++tu_cs_sink_reserve(struct tu_cs *cs, uint32_t reserved_size);
++
+ uint64_t
+ tu_cs_get_cur_iova(const struct tu_cs *cs);
+ 
+@@ -317,15 +333,20 @@ tu_cs_reserve(struct tu_cs *cs, uint32_t reserved_size)
+       return;
+    }
+ 
++   if (unlikely(cs->error)) {
++      tu_cs_sink_reserve(cs, reserved_size);
++      return;
++   }
++
+    if (tu_cs_get_space(cs) >= reserved_size &&
+        cs->entry_count < cs->entry_capacity) {
+       cs->reserved_end = cs->cur + reserved_size;
+       return;
+    }
+ 
+-   ASSERTED VkResult result = tu_cs_reserve_space(cs, reserved_size);
+-   /* TODO: set this error in tu_cs and use it */
+-   assert(result == VK_SUCCESS);
++   VkResult result = tu_cs_reserve_space(cs, reserved_size);
++   if (unlikely(result != VK_SUCCESS))
++      tu_cs_fail(cs, result, reserved_size);
+ }
+ 
+ /**
