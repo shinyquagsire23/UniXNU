@@ -126,7 +126,8 @@ def main():
     if tu_debug:
         files.append(('tu_debug', 0o644, (tu_debug + '\n').encode()))
     if reset_mobilegestalt:
-        files.append(('reset/mobilegestalt-cache', 0o644, b'artwork-display-gamut sRGB\n'))
+        # the marker's text names the device-tree answers that changed; new text makes the kernel drop the cache again
+        files.append(('reset/mobilegestalt-cache', 0o644, b'artwork-display-gamut sRGB\nproduct-id J120\n'))
     if ca_prefs:
         # backboardd picks a 10-bit deep framebuffer unless told not to and reads this when it starts, before the plugin can act
         import plistlib
