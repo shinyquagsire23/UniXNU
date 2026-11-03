@@ -73,7 +73,7 @@ index 3857cfb..d351b28 100644
      if(NativeGOPPresenter *p=OSDynamicCast(NativeGOPPresenter,presenter))p->setMemorySource(nub);
  }
 diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
-index 2291925..729d821 100644
+index 2291925..c22cd76 100644
 --- a/NativeLegacyDisplay.cpp
 +++ b/NativeLegacyDisplay.cpp
 @@ -8,6 +8,7 @@
@@ -84,7 +84,7 @@ index 2291925..729d821 100644
  #include <IOKit/pwr_mgt/IOPM.h>
  #include <IOKit/pwr_mgt/IOPMpowerState.h>
  #include <libkern/c++/OSData.h>
-@@ -49,6 +50,30 @@ extern "C" void native_legacy_retirement_observed(IOService *);
+@@ -49,6 +50,32 @@ extern "C" void native_legacy_retirement_observed(IOService *);
  // client reports the GPU copy done (native_legacy_gpu_complete). A refused offer or a failed copy uses the CPU copy below and is counted.
  extern "C" bool native_legacy_gpu_offer(void *display,IOMemoryDescriptor *,uint64_t stride,uint32_t width,uint32_t height);
  extern "C" void native_legacy_gpu_fallback_observed(int status);
@@ -100,7 +100,9 @@ index 2291925..729d821 100644
 +// the vsync tick: each holds the stage it last entered (0 idle), the mach time it entered it, and the thread. native_legacy_gate_dump
 +// prints them (FBGATE rows) with the freeze trace.
 +//   lane 0: 1 asking for the gate, 2 in it, 3 flip committed, 4 retiring (family completion), 5 retired, 6 kicking the next, 7 kicked
-+//   lane 1: 10 kick, 11 GPU offer, 12 CPU copy, 13 copied, 14 retiring, 15 retired, 20 vsync send
++//   lane 1: 10 kick, 14 retiring, 15 retired, 20 vsync send
++//   both lanes inside kickOnce (usb-163: lane 0's longest stage was the whole kick, 853 ms): 21 entered, 22 prepare scanout,
++//   11 GPU offer, 23 offered, 24 source mapped, 12 scans and copy timer, 25 flip target (GPU idle wait), 26 CPU copy, 13 copied
 +// native_legacy_gate_max: each lane's longest stage so far (usb-161: the current stage alone was overwritten when the stall ended at the
 +// kill): the stage, how long it lasted (mach time), the thread.
 +extern "C" {volatile uint64_t native_legacy_gate_lane[2][3],native_legacy_gate_max[2][3];}
@@ -115,7 +117,7 @@ index 2291925..729d821 100644
  // Display refresh tick (boot-arg sheng-vsync=<Hz>, 0 or absent: off). The original family sends the compositor's vsync message (type 5)
  // through native_legacy_vsync_notify, the unchanged original sender, but only a platform subclass calls it from the panel's vblank and
  // that subclass is not part of this port: without it the render server never saw a vsync. The GOP scanout has no vblank interrupt, so a
-@@ -114,7 +139,10 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
+@@ -114,7 +141,10 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
          if(!vsyncTimer)return;
          if(!vsyncWanted()){native_legacy_vsync_observed(2,vsyncHz);return;}
          const uint64_t now=mach_absolute_time();
@@ -126,7 +128,7 @@ index 2291925..729d821 100644
          native_legacy_vsync_observed(1,vsyncHz);
          vsyncNext+=vsyncInterval;
          if(vsyncNext<=now){vsyncNext=now+vsyncInterval;native_legacy_vsync_observed(3,vsyncHz);}
-@@ -143,11 +171,22 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
+@@ -143,11 +173,22 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
      }
  public:
      // Called by the GPU client's completion (any thread): the swap is finished on the framebuffer's work loop.
@@ -151,7 +153,7 @@ index 2291925..729d821 100644
          };
          if(loop)loop->runAction(action,this,&args);else finishGpuSwap(status);
      }
-@@ -236,12 +275,14 @@ public:
+@@ -236,14 +277,17 @@ public:
          armVsync();
          if(kicking){rekick=true;return;}
          kicking=true;
@@ -165,32 +167,61 @@ index 2291925..729d821 100644
 +        gateStage(lane(),completing?7:0);
      }
      void kickOnce() {
++        gateStage(lane(),21);
          unsigned enabled=0;PE_parse_boot_argn("offline-legacy-transfer",&enabled,sizeof(enabled));
-@@ -308,6 +349,7 @@ public:
+         if(enabled!=1 || transferred || !logicalPM || !bootMapping || !primary)return;
+         const OriginalLegacySwapRequest *request=pendingSwapRequest();
+@@ -303,14 +347,17 @@ public:
+         // The diagnostic renderer repaints the page over the scanout until it is told the system owns the display; the GPU path needs that as much
+         // as the CPU copy (int-093: accepted swaps were GPU-copied under a page that kept drawing).
+         if(!gpuBypass) {
++            gateStage(lane(),22);
+             if(!native_legacy_prepare_scanout()) {native_legacy_transfer_observed(kIOReturnNotReady,request,0);return;}
+         }
          // A deep 'b3a8' frame is narrowed to the 8-bit scanout by the CPU (native_legacy_copy_xr10): the GPU hand-off and the
          // differential copy move BGRA words unchanged.
          const bool xr10=native_legacy_is_xr10(native_legacy_surface_format(surface),native_legacy_surface_planes(surface));
-+        if(!completing)gateStage(1,11);
++        gateStage(lane(),11);
          if(!gpuBypass && !xr10 && (gpuFlip=flipPick()>=0,true) && native_legacy_gpu_offer(this,memory,sourceStride,width,height)) {
              // The GPU writes the scanout memory behind the CPU's back: the differential copy's picture of it is stale from now on.
              native_legacy_swap_stage(1);
-@@ -347,6 +389,7 @@ public:
++            gateStage(lane(),23);
+             shadowValid=false;gpuRequest=request;gpuLength=length;transferred=true;
+             // The compositor renders its next frame only after this swap retires, so retiring at the end of the copy and flip made every
+             // frame its render plus the copy and the flip's wait (pdx203 usb-146: about 24 presents a second with the GPU 25-50 % busy).
+@@ -325,6 +372,7 @@ public:
+             }
+             return;
+         }
++        gateStage(lane(),24);
+         IOMemoryMap *source=memory->map(kIOMapAnywhere|kIOMapReadOnly);
+         if(!source || !source->getVirtualAddress() || source->getLength()<allocation) {
+             OSSafeReleaseNULL(source);native_legacy_transfer_observed(kIOReturnNoMemory,request,0);return;
+@@ -347,12 +395,15 @@ public:
          if(!native_legacy_prepare_scanout()) {
              OSSafeReleaseNULL(source);native_legacy_transfer_observed(kIOReturnNotReady,request,0);return;
          }
-+        if(!completing)gateStage(1,12);
++        gateStage(lane(),12);
          uint64_t copyStart;__asm__ volatile("isb\n\tmrs %0, cntpct_el0":"=r"(copyStart));
          uint64_t stored=UINT64_MAX;
          // The page flip's back buffer, when the board has one: the whole frame goes there (no differential copy, which compares
-@@ -383,6 +426,7 @@ public:
+         // against the one buffer it last wrote), then the display is pointed at it.
+         uint64_t flipBytes=0;
++        gateStage(lane(),25);
+         volatile void *flipDest=flipTarget(&flipBytes);
++        gateStage(lane(),26);
+         volatile void *destination=flipDest ? flipDest : reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress());
+         const uint64_t destinationBytes=flipDest ? flipBytes : bootMapping->getLength();
+         {
+@@ -383,6 +434,7 @@ public:
          if(flipDest)native_legacy_flip_commit();
          {uint64_t copyEnd;__asm__ volatile("isb\n\tmrs %0, cntpct_el0":"=r"(copyEnd));native_legacy_copy_timing_observed(copyEnd-copyStart,stored);}
          OSSafeReleaseNULL(source);transferred=true;
-+        if(!completing)gateStage(1,13);
++        gateStage(lane(),13);
          native_legacy_transfer_observed(kIOReturnSuccess,request,length);
          finishTransfer(request);
      }
-@@ -403,6 +447,7 @@ public:
+@@ -403,6 +455,7 @@ public:
          }
          if(status==0) {
              if(gpuFlip)native_legacy_flip_commit();
@@ -198,7 +229,7 @@ index 2291925..729d821 100644
              native_legacy_transfer_observed(kIOReturnSuccess,request,gpuLength);
              finishTransfer(request,true);return;
          }
-@@ -411,28 +456,86 @@ public:
+@@ -411,28 +464,86 @@ public:
      }
      // Separately gated retirement after a real scanout store, shared by copied and blank frames.
      // Hands the pending head to the unchanged family's completion. Leaves transferred alone: the callers decide when the next frame may go.
@@ -287,7 +318,7 @@ index 2291925..729d821 100644
      IOReturn collectCompletionReports(uint32_t,void *,uint32_t *count,uint32_t) override {
          // The original completion helper passes null optional outputs and
          // ignores this IOReturn. GOP exposes no hardware completion telemetry.
-@@ -547,9 +650,23 @@ public:
+@@ -547,9 +658,23 @@ public:
      LEAF(306)
      LEAF(307)
      LEAF(338)
