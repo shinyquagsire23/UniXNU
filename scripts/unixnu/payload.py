@@ -133,7 +133,8 @@ def build(ctx, kernel=None):
     if data:
         shutil.copyfile(data, payloads / 'scratch-data.img')
     command = ['python3', ctx.tree / adt['tool'], '--output', payloads / 'kernel.macho.adt', '--dram-size', str(spec['dram_size'])]
-    for key, flag in (('owned_memory_size', '--owned-memory-size'), ('root_match_volume_uuid', '--root-match-volume-uuid'),
+    for key, flag in (('owned_memory_size', '--owned-memory-size'), ('gpu_pool_size', '--gpu-pool-size'),
+                      ('root_match_volume_uuid', '--root-match-volume-uuid'),
                       ('chip_id', '--chip-id'), ('cpu_regs', '--cpu-regs'), ('psci_method', '--psci-method'),
                       # mount(8) phase 1 names /private/preboot/<hash> from /chosen/boot-manifest-hash (UniXNU-uke)
                       ('boot_manifest_hash', '--boot-manifest-hash')):
