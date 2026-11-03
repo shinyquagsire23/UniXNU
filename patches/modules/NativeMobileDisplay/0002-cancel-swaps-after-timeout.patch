@@ -73,7 +73,7 @@ index 3857cfb..d351b28 100644
      if(NativeGOPPresenter *p=OSDynamicCast(NativeGOPPresenter,presenter))p->setMemorySource(nub);
  }
 diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
-index 2291925..c22cd76 100644
+index 2291925..9318df3 100644
 --- a/NativeLegacyDisplay.cpp
 +++ b/NativeLegacyDisplay.cpp
 @@ -8,6 +8,7 @@
@@ -93,7 +93,7 @@ index 2291925..c22cd76 100644
 +extern "C" void native_gop_handoff_state(uint64_t *state);
 +// Swaps the family gave up on after waiting 5 s (cancelSwapsAfterTimeout), and retirements refused because the family no longer queued
 +// the request (the latch is dropped then instead of holding every later frame back).
-+extern "C" {volatile uint32_t native_legacy_swap_timeouts,native_legacy_orphan_retires;}
++extern "C" {volatile uint32_t native_legacy_swap_timeouts,native_legacy_orphan_retires,native_legacy_gpu_dropped;}
 +// Who is inside the display's work-loop gate, and where. usb-159: backboardd's display thread waited 0.3 to 1.4 s in a no-block SwapWait
 +// (which never sleeps in the family: it waited for the gate) while its GPU hand-off thread sat in COMPLETE_SWAP; both ended, with one
 +// swap retired, only when backboardd's watchdog killed it. Lane 0 is the GPU completion (gpuComplete), lane 1 the family's kicks and
@@ -221,7 +221,13 @@ index 2291925..c22cd76 100644
          native_legacy_transfer_observed(kIOReturnSuccess,request,length);
          finishTransfer(request);
      }
-@@ -403,6 +455,7 @@ public:
+@@ -398,41 +450,106 @@ public:
+             if(status==0) {
+                 if(gpuFlip)native_legacy_flip_commit();
+                 native_legacy_transfer_observed(kIOReturnSuccess,request,gpuLength);
+-            } else {native_legacy_early_failures=native_legacy_early_failures+1;native_legacy_gpu_fallback_observed(status);gpuBypass=true;}
++            } else {native_legacy_early_failures=native_legacy_early_failures+1;native_legacy_gpu_fallback_observed(status);}
+             transferred=false;kickSwapQueue();return;
          }
          if(status==0) {
              if(gpuFlip)native_legacy_flip_commit();
@@ -229,7 +235,15 @@ index 2291925..c22cd76 100644
              native_legacy_transfer_observed(kIOReturnSuccess,request,gpuLength);
              finishTransfer(request,true);return;
          }
-@@ -411,28 +464,86 @@ public:
++        // A failed GPU copy drops the frame: the swap retires uncopied (the panel keeps the previous picture) and the next frame goes to
++        // the GPU again. usb-165: the plugin could not import a frame's surface pages (PF r3, kNoResource, 1 in 14643 while scrolling
++        // TestUFO) and the CPU copy that used to follow, inside this work loop's gate, sat 2 s in memory->map() of the same surface
++        // (gate stage 24) until backboardd's watchdog killed it, while backboardd's display thread waited for the gate. The CPU copy
++        // stays for frames no GPU client was there to take (the offer refused).
+         native_legacy_gpu_fallback_observed(status);
+-        transferred=false;gpuBypass=true;kickSwapQueue();
++        native_legacy_gpu_dropped=native_legacy_gpu_dropped+1;
++        finishTransfer(request,true);
      }
      // Separately gated retirement after a real scanout store, shared by copied and blank frames.
      // Hands the pending head to the unchanged family's completion. Leaves transferred alone: the callers decide when the next frame may go.
@@ -318,7 +332,7 @@ index 2291925..c22cd76 100644
      IOReturn collectCompletionReports(uint32_t,void *,uint32_t *count,uint32_t) override {
          // The original completion helper passes null optional outputs and
          // ignores this IOReturn. GOP exposes no hardware completion telemetry.
-@@ -547,9 +658,23 @@ public:
+@@ -547,9 +664,23 @@ public:
      LEAF(306)
      LEAF(307)
      LEAF(338)
