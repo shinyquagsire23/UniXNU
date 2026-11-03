@@ -1,0 +1,26 @@
+diff --git a/src/freedreno/vulkan/tu_cs.cc b/src/freedreno/vulkan/tu_cs.cc
+--- a/src/freedreno/vulkan/tu_cs.cc
++++ b/src/freedreno/vulkan/tu_cs.cc
+@@ -612,6 +612,22 @@
+       cs->start = cs->cur = cs->reserved_end = (uint32_t *) cs->read_only.bos[0]->map;
+       cs->end = cs->start + tu_sanitize_ib_size(cs->read_only.bos[0]->size /
+                                                 sizeof(uint32_t));
++
++      /* pdx203 (usb-147): a growing stream kept its last BO, the largest, across resets, and doubled its next size for good, so every
++       * command buffer that once recorded a large frame held a large BO for the rest of its life. The Metal runtime keeps every command
++       * pool it made and begins a spare's primary ahead (metal2vulkan spares.rs), so its idle command buffers held them: the render
++       * server's "cmd cs" BOs came to 299 MiB in 447 BOs, a third of its 1 GiB GPU window. A kept BO over 64 KiB goes back too (to the
++       * kernel connection's BO cache once its last submission retires), and the next one is no larger than it was: a large recording
++       * grows again in one BO. */
++      const uint64_t keep_bytes = 64 * 1024;
++      if (cs->mode == TU_CS_MODE_GROW && cs->read_only.bos[0]->size > keep_bytes) {
++         const uint32_t dwords = tu_sanitize_ib_size(cs->read_only.bos[0]->size / sizeof(uint32_t));
++         TU_RMV(resource_destroy, cs->device, cs->read_only.bos[0]);
++         tu_bo_finish(cs->device, cs->read_only.bos[0]);
++         cs->read_only.bo_count = 0;
++         cs->start = cs->cur = cs->reserved_end = cs->end = NULL;
++         cs->next_bo_size = MIN2(cs->next_bo_size, dwords);
++      }
+    }
+ 
+    if (cs->read_write.bo_count) {

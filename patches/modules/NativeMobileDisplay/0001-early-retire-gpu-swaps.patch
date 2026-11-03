@@ -27,7 +27,7 @@ diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
          if(logicalPM){PMstop();logicalPM=false;}
          primary=false;IOMobileFramebufferLegacy::stop(provider);OSSafeReleaseNULL(bootMapping);
      }
-@@ -308,7 +311,18 @@
+@@ -308,7 +311,19 @@
          if(!gpuBypass && !xr10 && (gpuFlip=flipPick()>=0,true) && native_legacy_gpu_offer(this,memory,sourceStride,width,height)) {
              // The GPU writes the scanout memory behind the CPU's back: the differential copy's picture of it is stale from now on.
              native_legacy_swap_stage(1);
@@ -37,9 +37,10 @@ diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
 +            // frame its render plus the copy and the flip's wait (pdx203 usb-146: about 24 presents a second with the GPU 25-50 % busy).
 +            // Retire now: the presenter holds its own reference to this frame's memory (NativeGOPPresenter::offer), the previous frame's
 +            // copy has finished (transferred held this one back), and the next swap still waits for this copy because transferred stays
-+            // set until finishGpuSwap. The compositor reuses this surface only after a later swap retires, which is after this copy.
-+            // sheng-early-retire=0 retires at the end of the copy as before.
-+            unsigned early=1;PE_parse_boot_argn("sheng-early-retire",&early,sizeof(early));
++            // set until finishGpuSwap. Opt-in (sheng-early-retire=1): on pdx203 (usb-147, sa13) it left TestUFO at 24 frames a second and
++            // made it flicker, the compositor drawing into a surface whose copy had not finished (the retirement frees the surface
++            // as far as the compositor knows; the presenter's reference keeps only its memory).
++            unsigned early=0;PE_parse_boot_argn("sheng-early-retire",&early,sizeof(early));
 +            if(early==1 && retireSwap(request,true)) {
 +                gpuRetired=true;native_legacy_early_retires=native_legacy_early_retires+1;
 +            }
@@ -47,7 +48,7 @@ diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
          }
          IOMemoryMap *source=memory->map(kIOMapAnywhere|kIOMapReadOnly);
          if(!source || !source->getVirtualAddress() || source->getLength()<allocation) {
-@@ -376,6 +390,16 @@
+@@ -376,6 +391,16 @@
          const OriginalLegacySwapRequest *request=gpuRequest;
          if(!request)return;
          gpuRequest=nullptr;
@@ -64,7 +65,7 @@ diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
          if(status==0) {
              if(gpuFlip)native_legacy_flip_commit();
              native_legacy_transfer_observed(kIOReturnSuccess,request,gpuLength);
-@@ -385,28 +409,29 @@
+@@ -385,28 +410,29 @@
          transferred=false;gpuBypass=true;kickSwapQueue();
      }
      // Separately gated retirement after a real scanout store, shared by copied and blank frames.
