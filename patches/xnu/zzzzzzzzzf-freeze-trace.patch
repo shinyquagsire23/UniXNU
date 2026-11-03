@@ -1,0 +1,28 @@
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1887,6 +1887,9 @@
+ {
+ 	mach_exception_data_type_t code = 0, subcode = 0;
+ 	exception_type_t etype;
++	/* pdx203 freeze trace (patches/xnu/zzzzzzzzzf-freeze-trace.patch): backboardd's or SpringBoard's threads where a signal found them */
++	extern void pdx203_exit_threads(const char *, int, int, int);
++	pdx203_exit_threads(p->p_name, proc_getpid(p), rv, p == current_proc());
+ 
+ 	struct uthread *ut;
+ 	thread_t self = current_thread();
+diff --git a/bsd/kern/kern_sig.c b/bsd/kern/kern_sig.c
+--- a/bsd/kern/kern_sig.c
++++ b/bsd/kern/kern_sig.c
+@@ -1399,6 +1399,11 @@
+ 			return EPERM;
+ 		}
+ 		if (uap->signum) {
++			/* pdx203 freeze trace (patches/xnu/zzzzzzzzzf-freeze-trace.patch): who ends the render server or SpringBoard */
++			if ((uap->signum == SIGTERM || uap->signum == SIGKILL || uap->signum == SIGABRT) &&
++			    (strncmp(p->p_name, "backboardd", sizeof("backboardd")) == 0 || strncmp(p->p_name, "SpringBoard", sizeof("SpringBoard")) == 0)) {
++				printf("KILLLOG %s[%d] -> %s[%d] sig %d\n", cp->p_name, proc_getpid(cp), p->p_name, proc_getpid(p), uap->signum);
++			}
+ 			psignal(p, uap->signum);
+ 		}
+ 		proc_rele(p);
