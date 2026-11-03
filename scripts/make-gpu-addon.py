@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pack the owner-built Adreno Metal plugin into a GPU addon file for the boot payload.
 
-  make-gpu-addon.py [--publish] [--selftest] [--ca-prefs] [--reset-mobilegestalt] [--tu-debug OPTIONS] [--clients NAME,...] [--wallpaper DIR] [--cryptex-app DIR] [--cryptex-os DIR ROOT] [--audio DIR] [--prime-list FILE] OUTPUT
+  make-gpu-addon.py [--publish] [--selftest] [--ca-prefs] [--reset-mobilegestalt] [--tu-debug OPTIONS] [--clients NAME,...] [--wallpaper DIR] [--cryptex-app DIR] [--cryptex-os DIR ROOT] [--audio DIR] [--wifi DIR] [--prime-list FILE] OUTPUT
 
 The files are the ones add-gpu-plugin-data.py stages into a Data seed, with the same paths below /private/var/ngpu and the same modes:
 addons/NativeAdrenoMetal.bundle/*, addons/NativeAdrenoMetal.publish (--publish), addons/NativeAdrenoMetal.selftest (--selftest: the plugin's once-per-process
@@ -85,6 +85,15 @@ def main():
         del args[at:at + 2]
         if not any(audio.glob('*.driver/Info.plist')):
             sys.exit('--audio takes a directory with a .driver bundle in it')
+    # --wifi DIR: the board's WiFi firmware files (the regular files directly in DIR, e.g. linux-firmware ath11k/QCA6390/hw2.0) as wifi/*,
+    # which the kernel stages below /private/var/ngpu for the board's WiFi driver to read. Firmware stays local: never commit an addon.
+    wifi = None
+    if '--wifi' in args:
+        at = args.index('--wifi')
+        wifi = Path(args[at + 1])
+        del args[at:at + 2]
+        if not any(p.is_file() for p in wifi.iterdir()):
+            sys.exit('--wifi takes a directory of firmware files')
     prime_list = None
     if '--prime-list' in args:
         at = args.index('--prime-list')
@@ -150,6 +159,9 @@ def main():
     if wallpaper:
         for path in sorted(p for p in wallpaper.rglob('*') if p.is_file()):
             files.append(('wallpaper/' + path.relative_to(wallpaper).as_posix(), 0o644, path.read_bytes()))
+    if wifi:
+        for path in sorted(p for p in wifi.iterdir() if p.is_file()):
+            files.append(('wifi/' + path.name, 0o644, path.read_bytes()))
     if audio:
         for path in sorted(p for p in audio.rglob('*') if p.is_file() and '.driver/' in p.as_posix()):
             files.append(('audio/' + path.relative_to(audio).as_posix(), 0o755 if path.stat().st_mode & 0o111 else 0o644, path.read_bytes()))
