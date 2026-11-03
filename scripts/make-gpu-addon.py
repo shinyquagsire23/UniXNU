@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pack the owner-built Adreno Metal plugin into a GPU addon file for the boot payload.
 
-  make-gpu-addon.py [--publish] [--selftest] [--ca-prefs] [--reset-mobilegestalt] [--tu-debug OPTIONS] [--clients NAME,...] [--wallpaper DIR] [--cryptex-app DIR] [--cryptex-os DIR ROOT] [--audio DIR] [--wifi DIR] [--oslog DIR] [--prime-list FILE] OUTPUT
+  make-gpu-addon.py [--publish] [--selftest] [--ca-prefs] [--reset-mobilegestalt] [--tu-debug OPTIONS] [--clients NAME,...] [--wallpaper DIR] [--cryptex-app DIR] [--cryptex-os DIR ROOT] [--audio DIR] [--wifi DIR] [--oslog DIR] [--user-endpoints ROOT NAME,...] [--prime-list FILE] OUTPUT
 
 The files are the ones add-gpu-plugin-data.py stages into a Data seed, with the same paths below /private/var/ngpu and the same modes:
 addons/NativeAdrenoMetal.bundle/*, addons/NativeAdrenoMetal.publish (--publish), addons/NativeAdrenoMetal.selftest (--selftest: the plugin's once-per-process
@@ -30,6 +30,7 @@ loader accepts (a 256 MiB ramdisk does not start the firmware), and the kernel a
 
 Layout, little endian: "NGPUADD2", u32 count, u32 0, u64 total bytes; per file u32 path bytes (with its NUL, at most 160), u32 mode,
 u64 size, u64 compressed size, the path padded to 8 bytes, the zlib stream padded to 8 bytes."""
+import plistlib
 import struct
 import sys
 import zlib
@@ -105,6 +106,20 @@ def main():
         del args[at:at + 2]
         if not (oslog / 'IOMFB_FDR_Loader').is_file():
             sys.exit('--oslog takes the directory build-oslog-console.py wrote')
+    # --user-endpoints ROOT NAME,...: ROOT's (the mounted OS image) /System/Library/xpc/foreground_user_endpoints.plist with the named
+    # mach services added, as xpc/foreground_user_endpoints.plist (kernel mount9 over /System/Library/xpc, patch zzy-zpreboot-cryptex-mount):
+    # launchd resolves a system-domain lookup in the user session's domain (the jobs of user mobile) only for the services listed there.
+    user_endpoints = None
+    if '--user-endpoints' in args:
+        at = args.index('--user-endpoints')
+        endpoints_file = Path(args[at + 1]) / 'System/Library/xpc/foreground_user_endpoints.plist'
+        names = [n for n in args[at + 2].split(',') if n]
+        del args[at:at + 3]
+        if not endpoints_file.is_file() or not names:
+            sys.exit('--user-endpoints takes the mounted OS image and a comma-separated list of mach services')
+        endpoints = plistlib.loads(endpoints_file.read_bytes())
+        endpoints.update({n: True for n in names})
+        user_endpoints = plistlib.dumps(endpoints)
     prime_list = None
     if '--prime-list' in args:
         at = args.index('--prime-list')
@@ -150,7 +165,6 @@ def main():
         files.append(('reset/mobilegestalt-cache', 0o644, b'artwork-display-gamut sRGB\nproduct-id J120\n'))
     if ca_prefs:
         # backboardd picks a 10-bit deep framebuffer unless told not to and reads this when it starts, before the plugin can act
-        import plistlib
         values = plistlib.dumps({'CAEnableDeepFramebuffer': False, 'CAEnableFramebufferCompression': False,
                                  'CAEnableIOSurfaceCompression': False}, fmt=plistlib.FMT_BINARY)
         # Every domain the keys can be read from without touching .GlobalPreferences (which the kernel cannot merge): QuartzCore's own
@@ -182,7 +196,6 @@ def main():
             files.append(('oslog/systemapps', 0o644, (oslog / 'systemapps').read_bytes()))
         # The unified log's system preferences with private data on: the kernel overlays logging/ on /Library/Preferences/Logging
         # (zzy-zoslog-addon-mount mount7), so the forwarded lines carry what logd otherwise redacts as <private>.
-        import plistlib
         files.append(('logging/com.apple.system.logging.plist', 0o644,
                       plistlib.dumps({'Enable-Private-Data': True}, fmt=plistlib.FMT_BINARY)))
     if wifi:
@@ -191,6 +204,8 @@ def main():
     if audio:
         for path in sorted(p for p in audio.rglob('*') if p.is_file() and '.driver/' in p.as_posix()):
             files.append(('audio/' + path.relative_to(audio).as_posix(), 0o755 if path.stat().st_mode & 0o111 else 0o644, path.read_bytes()))
+    if user_endpoints:
+        files.append(('xpc/foreground_user_endpoints.plist', 0o644, user_endpoints))
     if cryptex_app:
         for path in sorted(p for p in cryptex_app.rglob('*') if p.is_file() and not p.is_symlink()):
             name = 'cx/App/' + path.relative_to(cryptex_app).as_posix()

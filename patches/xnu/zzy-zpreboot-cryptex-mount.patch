@@ -1,6 +1,6 @@
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -7229,6 +7229,12 @@
+@@ -7229,6 +7229,17 @@
  volatile int native_gpu_addon6_status = -1;
  volatile int native_gpu_addon7_stage = 0;
  volatile int native_gpu_addon7_status = -1;
@@ -10,10 +10,15 @@
 + * registered and MobileSafari's web processes fail to launch with OSStatus -10814 (pdx203 usb-130). */
 +volatile int native_gpu_addon8_stage = 0;
 +volatile int native_gpu_addon8_status = -1;
++/* mount9: /System/Library/xpc with a foreground_user_endpoints.plist that also names installcoordinationd's and lsd's services. launchd runs
++ * the jobs of user mobile in the user session's domain and resolves a system-domain lookup there only for the services that file lists, so
++ * root daemons (the log forwarder running SystemAppMigrator, pdx203 usb-135) failed every installcoordinationd lookup with error 3. */
++volatile int native_gpu_addon9_stage = 0;
++volatile int native_gpu_addon9_status = -1;
  /* Executables reached through the App cryptex overlay (the bindfs mount on /System/Cryptexes, mount4 below): their code is checked
   * against the boot trust cache like any other, but AMFI's launch constraints (on-authorized-authapfs-volume and the category it gives
   * these Apple programs, c[8] even with an owner trust entry of category 0) can never match a file on owner Data, so every Safari service
-@@ -7241,6 +7247,14 @@
+@@ -7241,6 +7252,14 @@
  		return 0;
  	}
  	struct vfsstatfs *sp = vfs_statfs(vnode_mount(vp));
@@ -28,7 +33,7 @@
  	if (strcmp(sp->f_fstypename, "bindfs")) {
  		return 0;
  	}
-@@ -7609,8 +7623,14 @@
+@@ -7609,8 +7628,20 @@
  	native_gpu_addon_mount(p, scratch, 0xe40, logging_source, sizeof(logging_source), logging_point, sizeof(logging_point),
  	    "/Library/Preferences/Logging/Subsystems", "/Library/Preferences/Logging/com.apple.system.logging.plist", &native_gpu_addon7_stage,
  	    &native_gpu_addon7_status);
@@ -40,8 +45,14 @@
 +	static const char preboot_source[] = "/private/var/ngpu/pbcx", preboot_point[] = "/private/preboot";
 +	native_gpu_addon_mount(p, scratch, 0xe80, preboot_source, sizeof(preboot_source), preboot_point, sizeof(preboot_point),
 +	    "/private/preboot", "/private/preboot/Cryptexes/OS/SystemVersion.plist", &native_gpu_addon8_stage, &native_gpu_addon8_status);
-+	printf("GPUADDON mount6 (usr/bin) %d/%d mount7 (logging prefs) %d/%d mount8 (preboot cryptex version) %d/%d\n", native_gpu_addon6_stage,
-+	    native_gpu_addon6_status, native_gpu_addon7_stage, native_gpu_addon7_status, native_gpu_addon8_stage, native_gpu_addon8_status);
++	/* launchd's user-session endpoints (native_gpu_addon9_stage). Scratch slot 0xec0: type 0xec0, path 0xee0, data 0xfc0. */
++	static const char xpc_source[] = "/private/var/ngpu/xpc", xpc_point[] = "/System/Library/xpc";
++	native_gpu_addon_mount(p, scratch, 0xec0, xpc_source, sizeof(xpc_source), xpc_point, sizeof(xpc_point),
++	    "/System/Library/xpc/launchd.plist", "/System/Library/xpc/foreground_user_endpoints.plist", &native_gpu_addon9_stage,
++	    &native_gpu_addon9_status);
++	printf("GPUADDON mount6 (usr/bin) %d/%d mount7 (logging prefs) %d/%d mount8 (preboot cryptex version) %d/%d mount9 (user endpoints) %d/%d\n",
++	    native_gpu_addon6_stage, native_gpu_addon6_status, native_gpu_addon7_stage, native_gpu_addon7_status, native_gpu_addon8_stage,
++	    native_gpu_addon8_status, native_gpu_addon9_stage, native_gpu_addon9_status);
  }
  
  /* The deletable system apps (Weather, Notes, Calendar, ...) ship in the OS volume's /private/var/staged_system_apps. A restore copies
