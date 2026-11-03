@@ -1,0 +1,204 @@
+diff --git a/NativeGOPPresenter.cpp b/NativeGOPPresenter.cpp
+index 3857cfb..d351b28 100644
+--- a/NativeGOPPresenter.cpp
++++ b/NativeGOPPresenter.cpp
+@@ -16,6 +16,11 @@ volatile uint64_t native_gop_gpu_offers,native_gop_gpu_completions,native_gop_gp
+ /* waitSwap: [0] calls, [1] timeouts, [2] the requested timeout of the last call (ms), [3] time the last timed-out call really waited (ns), [4] the shortest
+  * and [5] the longest such wait (ns), [6] total ns waited in timed-out calls. A timed wait that returns long before its deadline shows here. */
+ volatile uint64_t native_gop_wait_stats[7];
++/* The offered frame's hand-off, for the display driver's stall report (native_gop_handoff_state): the mach time of the last offer and of its
++ * delivery to the GPU client, and the completions that entered the display driver (native_legacy_gpu_complete) and returned from it. A
++ * completion that entered and has not returned is waiting for the display's work loop. */
++volatile uint64_t native_gop_offer_time,native_gop_deliver_time,native_gop_complete_entered,native_gop_complete_returned;
++void native_gop_handoff_state(uint64_t *state);
+ IOService *native_gop_presenter_create(void);
+ bool native_gop_gpu_offer(IOService *,void *display,IOMemoryDescriptor *,uint64_t stride,uint32_t width,uint32_t height);
+ void native_gop_presenter_set_source(IOService *presenter,IOService *nub);
+@@ -47,6 +52,13 @@ class NativeGOPPresenter : public IOService {
+     void abandonSwap();
+ public:
+     void setMemorySource(IOService *source) {memorySource=source;}
++    void handoffState(uint64_t *state) {
++        const uint64_t now=mach_absolute_time();uint64_t ns=0;
++        state[0]=swap.offered;state[1]=swap.delivered;state[2]=swap.sequence;
++        if(swap.offered && native_gop_offer_time){absolutetime_to_nanoseconds(now-native_gop_offer_time,&ns);state[3]=ns/1000;}
++        if(swap.delivered && native_gop_deliver_time){absolutetime_to_nanoseconds(now-native_gop_deliver_time,&ns);state[4]=ns/1000;}
++        state[5]=native_gop_complete_entered;state[6]=native_gop_complete_returned;
++    }
+     static IOReturn handoffCall(uint32_t op,task_t task,const void *in,size_t inSize,void *out,size_t outSize);
+     static IOMemoryDescriptor *handoffMemory();
+     bool offer(void *display,IOMemoryDescriptor *,uint64_t stride,uint32_t width,uint32_t height);
+@@ -138,7 +150,7 @@ bool NativeGOPPresenter::offer(void *display,IOMemoryDescriptor *memory,uint64_t
+     if(accepted) {
+         memory->retain();
+         swap={true,false,++swapSequence,display,memory,nullptr,stride,width,height};
+-        native_gop_gpu_offers=native_gop_gpu_offers+1;
++        native_gop_gpu_offers=native_gop_gpu_offers+1;native_gop_offer_time=mach_absolute_time();
+         IOLockWakeup(gate,&swap,false);
+     }
+     IOLockUnlock(gate);return accepted;
+@@ -163,7 +175,7 @@ IOReturn NativeGOPPresenter::waitSwap(task_t task,uint64_t timeoutMs,NGPSwap *ou
+         }
+     }
+     if(!online) {IOLockUnlock(gate);return kIOReturnNotReady;}
+-    swap.delivered=true;
++    swap.delivered=true;native_gop_deliver_time=mach_absolute_time();
+     IOMemoryDescriptor *memory=swap.memory;memory->retain();
+     const uint64_t sequence=swap.sequence,stride=swap.stride;const uint32_t width=swap.width,height=swap.height;
+     IOLockUnlock(gate);
+@@ -189,7 +201,9 @@ IOReturn NativeGOPPresenter::completeSwap(uint64_t sequence,int status) {
+     OSSafeReleaseNULL(done.map);done.memory->release();
+     if(status)__atomic_fetch_add(&native_gop_gpu_failures,1,__ATOMIC_RELAXED);
+     else native_gop_gpu_completions=native_gop_gpu_completions+1;
+-    native_legacy_gpu_complete(done.display,status);return kIOReturnSuccess;
++    native_gop_complete_entered=native_gop_complete_entered+1;
++    native_legacy_gpu_complete(done.display,status);
++    native_gop_complete_returned=native_gop_complete_returned+1;return kIOReturnSuccess;
+ }
+ // The client went away with a frame outstanding: the display driver is told it failed, so it can use its own path instead of waiting forever.
+ void NativeGOPPresenter::abandonSwap() {
+@@ -203,6 +217,14 @@ void NativeGOPPresenter::abandonSwap() {
+     __atomic_fetch_add(&native_gop_gpu_abandoned,1,__ATOMIC_RELAXED);
+     native_legacy_gpu_complete(done.display,kIOReturnAborted);
+ }
++// [0] a frame is offered, [1] delivered to the GPU client, [2] its sequence, [3] us since the offer, [4] us since the delivery (0: none),
++// [5] completions entered the display driver, [6] returned from it. Read without the lock: a report, not a decision.
++extern "C" void native_gop_handoff_state(uint64_t *state) {
++    for(unsigned i=0;i<7;++i)state[i]=0;
++    NativeGOPPresenter *p=gHandoff;
++    if(!p)return;
++    p->handoffState(state);
++}
+ extern "C" void native_gop_presenter_set_source(IOService *presenter,IOService *nub) {
+     if(NativeGOPPresenter *p=OSDynamicCast(NativeGOPPresenter,presenter))p->setMemorySource(nub);
+ }
+diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
+index 2291925..7382d57 100644
+--- a/NativeLegacyDisplay.cpp
++++ b/NativeLegacyDisplay.cpp
+@@ -49,6 +49,12 @@ extern "C" void native_legacy_retirement_observed(IOService *);
+ // client reports the GPU copy done (native_legacy_gpu_complete). A refused offer or a failed copy uses the CPU copy below and is counted.
+ extern "C" bool native_legacy_gpu_offer(void *display,IOMemoryDescriptor *,uint64_t stride,uint32_t width,uint32_t height);
+ extern "C" void native_legacy_gpu_fallback_observed(int status);
++// The hand-off's state for the stall report below (NativeGOPPresenter.cpp: offered, delivered, sequence, us since offer and delivery,
++// completions entered and returned).
++extern "C" void native_gop_handoff_state(uint64_t *state);
++// Swaps the family gave up on after waiting 5 s (cancelSwapsAfterTimeout), and retirements refused because the family no longer queued
++// the request (the latch is dropped then instead of holding every later frame back).
++extern "C" {volatile uint32_t native_legacy_swap_timeouts,native_legacy_orphan_retires;}
+ // Display refresh tick (boot-arg sheng-vsync=<Hz>, 0 or absent: off). The original family sends the compositor's vsync message (type 5)
+ // through native_legacy_vsync_notify, the unchanged original sender, but only a platform subclass calls it from the panel's vblank and
+ // that subclass is not part of this port: without it the render server never saw a vsync. The GOP scanout has no vblank interrupt, so a
+@@ -143,11 +149,16 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
+     }
+ public:
+     // Called by the GPU client's completion (any thread): the swap is finished on the framebuffer's work loop.
++    // The longest a GPU completion waited for the work loop (mach time): a completion stuck behind the gate holds its swap unretired.
++    uint64_t gateWaitMax=0;
+     void gpuComplete(int status) {
+-        struct Args {NativeLegacyDisplay *display;int status;} args={this,status};
++        struct Args {NativeLegacyDisplay *display;int status;uint64_t asked;} args={this,status,mach_absolute_time()};
+         IOWorkLoop *loop=getWorkLoop();
+         auto action=[](OSObject *,void *a0,void *,void *,void *)->IOReturn {
+-            Args *a=static_cast<Args *>(a0);a->display->finishGpuSwap(a->status);return kIOReturnSuccess;
++            Args *a=static_cast<Args *>(a0);
++            const uint64_t waited=mach_absolute_time()-a->asked;
++            if(waited>a->display->gateWaitMax)a->display->gateWaitMax=waited;
++            a->display->finishGpuSwap(a->status);return kIOReturnSuccess;
+         };
+         if(loop)loop->runAction(action,this,&args);else finishGpuSwap(status);
+     }
+@@ -411,14 +422,16 @@ public:
+     }
+     // Separately gated retirement after a real scanout store, shared by copied and blank frames.
+     // Hands the pending head to the unchanged family's completion. Leaves transferred alone: the callers decide when the next frame may go.
++    bool queueRefused=false;   // the last retireSwap failed because the request was not the family's only pending head
+     bool retireSwap(const OriginalLegacySwapRequest *request,bool force) {
++        queueRefused=false;
+         unsigned retire=0,cpuPresent=0;
+         PE_parse_boot_argn("offline-legacy-retire",&retire,sizeof(retire));
+         PE_parse_boot_argn("offline-legacy-cpu-present",&cpuPresent,sizeof(cpuPresent));
+         if(!(retire==1 || cpuPresent==1 || force))return false;
+         // Select the actual pending head and let the unchanged family release it and wake waiters. This reports memory scanout
+         // completion, not a panel vblank or hardware fence.
+-        if(!activateOnlyPendingSwap(request))return false;
++        if(!activateOnlyPendingSwap(request)){queueRefused=true;return false;}
+         removeValidated(request);
+         IOMobileFramebufferLegacy::completeCurrentSwap();
+         native_legacy_retirement_observed(this);
+@@ -427,12 +440,66 @@ public:
+     void finishTransfer(const OriginalLegacySwapRequest *request,bool force=false) {
+         // Only after the real copy and store barrier. Producer completion must precede submission; this does not implement asynchronous
+         // GPU sync.
+-        if(!retireSwap(request,force))return;
++        if(!retireSwap(request,force)) {
++            if(!queueRefused)return;
++            // The family's queue no longer has this request at its head (pdx203 usb-157: a GPU copy completed after the family had
++            // cancelled its swaps, the refusal left transferred set and no later frame was ever kicked). A request the family dropped
++            // entirely is let go; one still queued keeps the latch (the family's own timeout ends it through cancelSwapsAfterTimeout).
++            troubleReport("retire",request);
++            if(familyHolds(request))return;
++            native_legacy_orphan_retires=native_legacy_orphan_retires+1;
++            removeValidated(request);transferred=false;kickSwapQueue();return;
++        }
+         // The unchanged family has retired this generation and released its current reference. Permit the next independently validated
+         // single pending frame. Keep the latch set while completion can reenter this method, and whenever retirement remains disabled.
+         transferred=false;
+         kickSwapQueue();
+     }
++    // Whether the family still has the request as its current swap or anywhere in its pending queue (head +5480, next link at +2960).
++    bool familyHolds(const OriginalLegacySwapRequest *request) const {
++        auto self=reinterpret_cast<const unsigned char *>(this);
++        const void *current=nullptr,*entry=nullptr;
++        memcpy(&current,self+5472,8);memcpy(&entry,self+5480,8);
++        if(!request)return false;
++        if(current==request)return true;
++        for(unsigned n=0;entry && n<32;++n) {
++            if(entry==request)return true;
++            memcpy(&entry,reinterpret_cast<const unsigned char *>(entry)+2960,8);
++        }
++        return false;
++    }
++    // One SWAPTROUBLE row: the family's queue as this class sees it, its own latches and the hand-off's state.
++    void troubleReport(const char *what,const OriginalLegacySwapRequest *request) {
++        auto self=reinterpret_cast<const unsigned char *>(this);
++        const void *current=nullptr,*head=nullptr,*entry=nullptr;
++        memcpy(&current,self+5472,8);memcpy(&head,self+5480,8);
++        unsigned queued=0;int at=-1;entry=head;
++        for(;entry && queued<32;++queued) {
++            if(entry==request && at<0)at=(int)queued;
++            memcpy(&entry,reinterpret_cast<const unsigned char *>(entry)+2960,8);
++        }
++        uint32_t completed=0,presented=0;memcpy(&completed,self+5820,4);memcpy(&presented,self+5824,4);
++        unsigned valid=0;for(auto e: validated)if(e)++valid;
++        uint64_t hand[7];native_gop_handoff_state(hand);
++        uint64_t gateNs=0;absolutetime_to_nanoseconds(gateWaitMax,&gateNs);
++        IOLog("SWAPTROUBLE %s req %llx cur %llx head %llx queued %u at %d | transferred %d kicking %d gpuReq %llx retired %d bypass %d valid %u"
++              " | gen %u/%u | hand offered %llu delivered %llu seq %llu age %llu/%llu us in %llu out %llu | gate max %llu us | timeouts %u orphans %u\n",
++              what,(unsigned long long)(uintptr_t)request,(unsigned long long)(uintptr_t)current,(unsigned long long)(uintptr_t)head,queued,at,
++              transferred,kicking,(unsigned long long)(uintptr_t)gpuRequest,gpuRetired,gpuBypass,valid,completed,presented,
++              hand[0],hand[1],hand[2],hand[3],hand[4],hand[5],hand[6],gateNs/1000,native_legacy_swap_timeouts,native_legacy_orphan_retires);
++    }
++    // swap_wait_gated gives up on a swap that has not completed in 5 s ("CommandWake didn't happen even after 5 seconds ... cancelling
++    // swaps"), calls this slot (345), then cancels its own queue. It used to be a guard leaf: on pdx203 (usb-157) the display thread
++    // never came back from it and the screen stayed frozen while the rest of the system ran on. Forget the swaps this class tracks: a GPU
++    // copy that ends later finds no request (finishGpuSwap), and the next frame is not held behind the cancelled one. The presenter keeps
++    // its offer until the GPU client completes it; frames meanwhile take the CPU copy.
++    bool cancelSwapsAfterTimeout() override {
++        native_legacy_swap_timeouts=native_legacy_swap_timeouts+1;
++        troubleReport("cancel",gpuRequest);
++        for(auto &entry: validated)entry=nullptr;
++        gpuRequest=nullptr;gpuRetired=false;transferred=false;gpuBypass=false;
++        return true;
++    }
+     IOReturn collectCompletionReports(uint32_t,void *,uint32_t *count,uint32_t) override {
+         // The original completion helper passes null optional outputs and
+         // ignores this IOReturn. GOP exposes no hardware completion telemetry.
+@@ -547,7 +614,6 @@ public:
+     LEAF(306)
+     LEAF(307)
+     LEAF(338)
+-    LEAF(345)
+ #undef LEAF
+ };
+ OSDefineMetaClassAndStructors(NativeLegacyDisplay,IOMobileFramebufferLegacy)
