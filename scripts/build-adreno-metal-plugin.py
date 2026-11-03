@@ -14,6 +14,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'build/adreno-metal-plugin'
+# The board's changes to the NativeMetal module ride as patches (patches/modules/NativeMetal/*.patch, in name order) rather than as commits
+# of the submodule, which a submodule update would leave behind. One already applied is left alone; one that applies neither way stops the build.
+for module_patch in sorted((ROOT / 'patches/modules/NativeMetal').glob('*.patch')):
+    module = ROOT / 'drivers/NativeMetal'
+    if subprocess.run(['git', '-C', module, 'apply', '--reverse', '--check', module_patch], capture_output=True).returncode == 0:
+        continue
+    subprocess.run(['git', '-C', module, 'apply', module_patch], check=True)
+    print('applied', module_patch.name, 'to drivers/NativeMetal')
 bundle = OUT / 'NativeAdrenoMetal.bundle'
 if OUT.exists():
     shutil.rmtree(OUT)

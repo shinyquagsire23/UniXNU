@@ -1,0 +1,25 @@
+diff --git a/NativeBridgeMetalFrontend.mm b/NativeBridgeMetalFrontend.mm
+index 932fcd8..ed9400b 100644
+--- a/NativeBridgeMetalFrontend.mm
++++ b/NativeBridgeMetalFrontend.mm
+@@ -4295,6 +4295,20 @@ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
+     (unsigned long long)mc[8],(unsigned long long)mc[9],(unsigned long long)(bc[5]>>20),(unsigned long long)(bc[6]>>20),
+     (unsigned long long)bc[2],(unsigned long long)bc[3]);
+   }
++  // pdx203: the device's GPU address space (tu_darwin_va_stats, patches/mesa/turnip-darwin-va-stats.patch), MiB: handed out of the window,
++  // the largest free hole and the holes, the highest end used, then allocations, frees, allocations nothing fit and frees refused. The
++  // render server's window filled while its memory stayed near 430 MiB, and a command stream that could not grow was written past its end.
++  {
++   uint64_t va[9]={};
++   static void *turnipVa=gLoaderPath.empty()?nullptr:dlopen(gLoaderPath.c_str(),RTLD_NOW|RTLD_NOLOAD);
++   static void (*vaStats)(uint64_t *)=turnipVa?(void (*)(uint64_t *))dlsym(turnipVa,"tu_darwin_va_stats"):nullptr;
++   if(vaStats) {
++    vaStats(va);
++    row("VA %llu/%lluM big %lluM h%llu top %lluM | a%llu f%llu fail %llu ref %llu",(unsigned long long)(va[1]>>20),
++     (unsigned long long)(va[0]>>20),(unsigned long long)(va[3]>>20),(unsigned long long)va[2],(unsigned long long)(va[8]>>20),
++     (unsigned long long)va[4],(unsigned long long)va[5],(unsigned long long)va[6],(unsigned long long)va[7]);
++   }
++  }
+   // How Turnip rendered the passes (tu_render_mode_stats): GMEM passes and their Mpx, SYSMEM passes the autotuner chose and theirs,
+   // SYSMEM passes for another reason and theirs, then GMEM passes with an attachment loaded or stored over its texels alone.
+   {

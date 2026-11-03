@@ -1,0 +1,95 @@
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -103,6 +103,8 @@
+    bool seeded;
+    uint64_t holes, allocs, frees, merges;
+    uint64_t used;   /* bytes handed out */
++   uint64_t failed, refused, high;   /* allocations nothing fit, frees refused as overlapping, highest end handed out */
++   uint64_t largest;   /* the largest free hole, as of the last allocation or free (under the device's vma_mutex) */
+ };
+ 
+ struct darwin_retire_state {
+@@ -138,6 +140,31 @@
+    out[5] = retire->cache_bytes;
+    out[6] = retire->cache_stats.bytes_peak;
+    out[7] = retire->va.holes;
++   pthread_mutex_unlock(&retire->lock);
++}
++
++/* The GPU address space of the device (pdx203: backboardd's window filled while its memory stayed near 430 MiB, and Turnip's command
++ * streams wrote past a block they could not grow): [0] window bytes, [1] handed out, [2] free holes, [3] the largest hole, [4] allocations,
++ * [5] frees, [6] allocations nothing fit, [7] frees refused as overlapping a hole, [8] the highest end above the window's start. */
++extern "C" __attribute__((visibility("default"))) void tu_darwin_va_stats(uint64_t out[9]);
++extern "C" __attribute__((visibility("default"))) void
++tu_darwin_va_stats(uint64_t out[9])
++{
++   struct darwin_retire_state *retire = darwin_stats_state;
++   memset(out, 0, 9 * sizeof(uint64_t));
++   if (!retire)
++      return;
++   pthread_mutex_lock(&retire->lock);
++   const struct darwin_va *va = &retire->va;
++   out[0] = retire->conn.info.va_size;
++   out[1] = va->used;
++   out[2] = va->holes;
++   out[3] = va->largest;
++   out[4] = va->allocs;
++   out[5] = va->frees;
++   out[6] = va->failed;
++   out[7] = va->refused;
++   out[8] = va->high > retire->conn.info.va_start ? va->high - retire->conn.info.va_start : 0;
+    pthread_mutex_unlock(&retire->lock);
+ }
+ 
+@@ -381,6 +408,16 @@
+    free(hole);
+ }
+ 
++/* The largest hole: the size tree's rightmost node (its comparator puts larger keys on the right, see above). */
++static void
++darwin_va_note_largest(struct darwin_va *va)
++{
++   uint64_t largest = 0;
++   for (struct rb_node *x = va->size.root; x; x = x->right)
++      largest = rb_node_data(struct darwin_va_hole, x, by_size)->size;
++   va->largest = largest;
++}
++
+ /* Takes [at, at + size) out of a hole that contains it; what is left on either side stays free. */
+ static void
+ darwin_va_carve(struct darwin_va *va, struct darwin_va_hole *hole, uint64_t at, uint64_t size)
+@@ -391,6 +428,9 @@
+    darwin_va_add(va, at + size, end - (at + size));
+    ++va->allocs;
+    va->used += size;
++   if (at + size > va->high)
++      va->high = at + size;
++   darwin_va_note_largest(va);
+ }
+ 
+ /* From the smallest hole that fits (best fit); a high allocation takes the end of it. 0 when nothing fits. */
+@@ -444,6 +484,7 @@
+    if ((below && below->start + below->size > address) || (above && above->start < address + size)) {
+       mesa_loge("darwin: GPU range %#llx+%#llx freed over a free hole", (unsigned long long)address,
+                 (unsigned long long)size);
++      ++va->refused;
+       return;
+    }
+    uint64_t begin = address, end = address + size;
+@@ -460,6 +501,7 @@
+    darwin_va_add(va, begin, end - begin);
+    ++va->frees;
+    va->used -= size;
++   darwin_va_note_largest(va);
+ }
+ 
+ static VkResult
+@@ -488,6 +530,8 @@
+    } else {
+       *iova = darwin_va_alloc(va, size, os_page_size, false);
+    }
++   if (!*iova)
++      ++va->failed;
+    mtx_unlock(&dev->vma_mutex);
+    return *iova ? VK_SUCCESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+ }

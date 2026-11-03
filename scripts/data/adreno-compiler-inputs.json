@@ -57,7 +57,8 @@
     "patches/mesa/turnip-render-mode-for-attachment-memory.patch",
     "patches/mesa/vk-report-device-loss.patch",
     "patches/mesa/turnip-darwin-per-device-connection.patch",
-    "patches/mesa/turnip-a6xx-gmem-mutable-swap.patch"
+    "patches/mesa/turnip-a6xx-gmem-mutable-swap.patch",
+    "patches/mesa/turnip-darwin-va-stats.patch"
   ],
   "integer_fma_reference": {
     "repository": "https://github.com/ucb-bar/berkeley-softfloat-3",
