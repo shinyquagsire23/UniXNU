@@ -13,7 +13,22 @@
  /* Executables reached through the App cryptex overlay (the bindfs mount on /System/Cryptexes, mount4 below): their code is checked
   * against the boot trust cache like any other, but AMFI's launch constraints (on-authorized-authapfs-volume and the category it gives
   * these Apple programs, c[8] even with an owner trust entry of category 0) can never match a file on owner Data, so every Safari service
-@@ -7609,8 +7615,14 @@
+@@ -7241,6 +7247,14 @@
+ 		return 0;
+ 	}
+ 	struct vfsstatfs *sp = vfs_statfs(vnode_mount(vp));
++	/* The SystemOS cryptex, mounted as a union over / (the only apfs mount on / with MNT_UNION): once LaunchServices registers its
++	 * WebKit extensions (mount8), WebContent, GPU and Networking run from it and their launch constraints, written for the cryptex
++	 * cryptexd mounts from Preboot, never match (pdx203 usb-133: c[1]p[1]m[1]e[4], SIGKILL at exec). */
++	if (native_gpu_addon8_stage >= 3 && (vfs_flags(vnode_mount(vp)) & MNT_UNION) && !strcmp(sp->f_fstypename, "apfs") &&
++	    !strcmp(sp->f_mntonname, "/")) {
++		native_gpu_addon_cryptex_execs++;
++		return 1;
++	}
+ 	if (strcmp(sp->f_fstypename, "bindfs")) {
+ 		return 0;
+ 	}
+@@ -7609,8 +7623,14 @@
  	native_gpu_addon_mount(p, scratch, 0xe40, logging_source, sizeof(logging_source), logging_point, sizeof(logging_point),
  	    "/Library/Preferences/Logging/Subsystems", "/Library/Preferences/Logging/com.apple.system.logging.plist", &native_gpu_addon7_stage,
  	    &native_gpu_addon7_status);
