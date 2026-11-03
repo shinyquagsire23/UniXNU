@@ -18,7 +18,7 @@ cryptex, Cryptex1,SystemOS) that the root filesystem ROOT (the mounted OS image)
 Safari's and WebKit's frameworks (SafariShared.framework and the others are such symlinks, and their resources lie only in the cryptex) and
 the WebContent, GPU and Networking extensions. Without them MobileSafari threw "nil URL argument" loading SafariShared's built-in lists
 (pdx203 usb-57). The SystemOS trust module is one of the two original ones. A file whose addon path is longer than the kernel takes is
-left out and named. It also adds the cryptex's SystemVersion.plist as pbcx/OS/SystemVersion.plist, which the kernel mounts at
+left out and named. It also adds the cryptex's SystemVersion.plist as pbcx/Cryptexes/OS/SystemVersion.plist, which the kernel mounts at
 /private/preboot/Cryptexes/OS: LaunchServices registers the WebKit extensions only once it reads a cryptex version there. --prime-list adds FILE (the absolute paths of the OS image's .metallib
 files, one per line) as addons/NativeAdrenoMetal.primelist, the libraries the render server compiles ahead (PrimeShaders.h). The payload carries the file next to the kernel (unixnu build payload --gpu-addon), the loader
 hands it to the kernel as /chosen/memory-map/GpuAddon, and the kernel writes every file whose content or mode differs into the mounted
@@ -214,9 +214,9 @@ def main():
                     print('left out (path too long): ' + name, file=sys.stderr)
                     continue
                 files.append((name, 0o755 if path.stat().st_mode & 0o111 else 0o644, path.read_bytes()))
-        # The cryptex's version where LaunchServices reads it (/private/preboot/Cryptexes/OS/SystemVersion.plist, kernel mount8 of
+        # The cryptex's version where LaunchServices reads it (/private/preboot/Cryptexes/OS/SystemVersion.plist, kernel mount8 over /private/preboot of
         # patch zzy-zpreboot-cryptex-mount): it registers the cryptex's extensions only when that version changes.
-        files.append(('pbcx/OS/SystemVersion.plist', 0o644, (system_os / 'System/Library/CoreServices/SystemVersion.plist').read_bytes()))
+        files.append(('pbcx/Cryptexes/OS/SystemVersion.plist', 0o644, (system_os / 'System/Library/CoreServices/SystemVersion.plist').read_bytes()))
     body = b''
     for name, mode, data in files:
         encoded = name.encode() + b'\0'
