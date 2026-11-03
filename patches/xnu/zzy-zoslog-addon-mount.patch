@@ -1,5 +1,5 @@
---- a/bsd/kern/kern_exec.c	2026-11-02 23:15:29
-+++ b/bsd/kern/kern_exec.c	2026-11-02 23:15:29
+--- a/bsd/kern/kern_exec.c	2026-11-02 23:25:47
++++ b/bsd/kern/kern_exec.c	2026-11-02 23:25:47
 @@ -7220,6 +7220,15 @@
  volatile int native_gpu_addon4_status = -1;
  volatile int native_gpu_addon5_stage = 0;
@@ -30,7 +30,7 @@
  	native_gpu_addon_cryptex_execs++;
  	return 1;
  }
-@@ -7588,6 +7600,15 @@
+@@ -7588,6 +7600,17 @@
  	native_gpu_addon_mount(p, scratch, 0xc00, audio_source, sizeof(audio_source), audio_point, sizeof(audio_point),
  	    "/System/Library/Audio/Plug-Ins/HAL/BuiltinAudioPlugin.driver", "/System/Library/Audio/Plug-Ins/HAL/ShengAudio.driver/Info.plist",
  	    &native_gpu_addon5_stage, &native_gpu_addon5_status);
@@ -43,6 +43,8 @@
 +	native_gpu_addon_mount(p, scratch, 0xe40, logging_source, sizeof(logging_source), logging_point, sizeof(logging_point),
 +	    "/Library/Preferences/Logging/Subsystems", "/Library/Preferences/Logging/com.apple.system.logging.plist", &native_gpu_addon7_stage,
 +	    &native_gpu_addon7_status);
++	printf("GPUADDON mount6 (usr/bin) %d/%d mount7 (logging prefs) %d/%d\n", native_gpu_addon6_stage, native_gpu_addon6_status,
++	    native_gpu_addon7_stage, native_gpu_addon7_status);
  }
  
  /* The deletable system apps (Weather, Notes, Calendar, ...) ship in the OS volume's /private/var/staged_system_apps. A restore copies
