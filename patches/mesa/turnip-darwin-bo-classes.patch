@@ -1,0 +1,153 @@
+diff --git a/src/freedreno/vulkan/tu_knl.h b/src/freedreno/vulkan/tu_knl.h
+--- a/src/freedreno/vulkan/tu_knl.h
++++ b/src/freedreno/vulkan/tu_knl.h
+@@ -66,6 +66,8 @@
+    /* Size of the allocation behind a cacheable BO (its size class; 0: never cached) and its GPU permissions class. */
+    uint64_t darwin_alloc_size;
+    bool darwin_read_only;
++   /* 1 + the index of the BO's name in the device's live-BO table (tu_darwin_bo_classes), 0 for none. */
++   uint8_t darwin_class;
+ #endif
+ 
+    bool implicit_sync : 1;
+diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -107,6 +107,12 @@
+    uint64_t largest;   /* the largest free hole, as of the last allocation or free (under the device's vma_mutex) */
+ };
+ 
++/* The live BOs of one name Turnip gave them: bytes of GPU address space (a cacheable BO's size class), count, and the most bytes at once. */
++struct darwin_bo_class {
++   char name[24];
++   uint64_t bytes, count, peak;
++};
++
+ struct darwin_retire_state {
+    pthread_mutex_t lock;
+    struct darwin_retired_bo *entries;   /* a ring of `capacity` records, grown when full */
+@@ -120,6 +126,8 @@
+    struct darwin_bo_cache_stats cache_stats;
+    struct darwin_va va;
+    struct darwin_conn conn;   /* this device's kernel connection */
++   struct darwin_bo_class classes[48];   /* the live BOs by name (tu_darwin_bo_classes) */
++   unsigned class_count;
+ };
+ static struct darwin_retire_state *darwin_stats_state;   /* for tu_darwin_bo_cache_stats */
+ 
+@@ -143,6 +151,71 @@
+    pthread_mutex_unlock(&retire->lock);
+ }
+ 
++/* Counts a new live BO under its name (under the retire lock); 1 + its index, or 0 when the table is full. */
++static uint8_t
++darwin_bo_class_add(struct darwin_retire_state *retire, const char *name, uint64_t bytes)
++{
++   if (!name)
++      name = "?";
++   unsigned i = 0;
++   while (i < retire->class_count && strncmp(retire->classes[i].name, name, sizeof(retire->classes[i].name) - 1))
++      ++i;
++   if (i == retire->class_count) {
++      if (i == ARRAY_SIZE(retire->classes))
++         return 0;
++      memset(&retire->classes[i], 0, sizeof(retire->classes[i]));
++      strncpy(retire->classes[i].name, name, sizeof(retire->classes[i].name) - 1);
++      ++retire->class_count;
++   }
++   struct darwin_bo_class *c = &retire->classes[i];
++   c->bytes += bytes;
++   ++c->count;
++   if (c->bytes > c->peak)
++      c->peak = c->bytes;
++   return (uint8_t)(i + 1);
++}
++
++/* pdx203 (usb-146): backboardd's GPU window filled to 991 of 1024 MiB with only about 380 MiB of it the runtime's memory, and the rest
++ * Turnip's own BOs. The live BOs by name, most bytes first, as "name=MiB/count/peak MiB" separated by spaces (names' spaces as '_'),
++ * after "q<MiB>/<count>": the freed BOs that still hold their range until their last submission retires. */
++extern "C" __attribute__((visibility("default"))) size_t tu_darwin_bo_classes(char *out, size_t cap);
++extern "C" __attribute__((visibility("default"))) size_t
++tu_darwin_bo_classes(char *out, size_t cap)
++{
++   struct darwin_retire_state *retire = darwin_stats_state;
++   if (!cap)
++      return 0;
++   out[0] = 0;
++   if (!retire)
++      return 0;
++   pthread_mutex_lock(&retire->lock);
++   uint64_t queued = 0;
++   for (unsigned i = 0; i < retire->count; ++i)
++      queued += retire->entries[(retire->head + i) % retire->capacity].size;
++   size_t at = (size_t)snprintf(out, cap, "q%llu/%u", (unsigned long long)(queued >> 20), retire->count);
++   bool shown[ARRAY_SIZE(retire->classes)] = {};
++   for (unsigned n = 0; n < retire->class_count && at < cap; ++n) {
++      int best = -1;
++      for (unsigned i = 0; i < retire->class_count; ++i) {
++         if (!shown[i] && (best < 0 || retire->classes[i].bytes > retire->classes[best].bytes))
++            best = (int)i;
++      }
++      shown[best] = true;
++      const struct darwin_bo_class *c = &retire->classes[best];
++      if (!c->count)
++         continue;
++      char name[sizeof(c->name)];
++      unsigned k = 0;
++      for (; c->name[k] && k < sizeof(name) - 1; ++k)
++         name[k] = c->name[k] == ' ' ? '_' : c->name[k];
++      name[k] = 0;
++      at += (size_t)snprintf(out + at, cap - at, " %s=%llu/%llu/%llu", name, (unsigned long long)(c->bytes >> 20),
++                             (unsigned long long)c->count, (unsigned long long)(c->peak >> 20));
++   }
++   pthread_mutex_unlock(&retire->lock);
++   return at < cap ? at : cap - 1;
++}
++
+ /* The GPU address space of the device (pdx203: backboardd's window filled while its memory stayed near 430 MiB, and Turnip's command
+  * streams wrote past a block they could not grow): [0] window bytes, [1] handed out, [2] free holes, [3] the largest hole, [4] allocations,
+  * [5] frees, [6] allocations nothing fit, [7] frees refused as overlapping a hole, [8] the highest end above the window's start. */
+@@ -891,6 +964,7 @@
+    struct tu_bo *bo = tu_device_lookup_bo(dev, gem_handle);
+    assert(bo && bo->gem_handle == 0);
+ 
++   const char *class_name = name;
+    name = tu_debug_bos_add(dev, size, name);
+ 
+    *bo = (struct tu_bo) {
+@@ -906,6 +980,9 @@
+    bo->darwin_handle = handle;
+    bo->darwin_alloc_size = cacheable ? alloc_size : 0;
+    bo->darwin_read_only = read_only;
++   pthread_mutex_lock(&retire->lock);
++   bo->darwin_class = darwin_bo_class_add(retire, class_name, cacheable ? alloc_size : size);
++   pthread_mutex_unlock(&retire->lock);
+    if (reused && cached_mapping) {
+       bo->map = cached_mapping;
+       bo->darwin_token = cached_token;
+@@ -971,6 +1048,12 @@
+    bo->darwin_token = 0;
+    bo->map = pointer;
+    bo->never_unmap = true;
++   {
++      struct darwin_retire_state *retire = (struct darwin_retire_state *)dev->darwin_retire;
++      pthread_mutex_lock(&retire->lock);
++      bo->darwin_class = darwin_bo_class_add(retire, "host import", size);
++      pthread_mutex_unlock(&retire->lock);
++   }
+    tu_dump_bo_init(dev, bo);
+    TU_RMV(bo_allocate, dev, bo);
+    *out_bo = bo;
+@@ -1087,6 +1170,12 @@
+ 
+    struct darwin_retire_state *retire = (struct darwin_retire_state *)dev->darwin_retire;
+    pthread_mutex_lock(&retire->lock);
++   if (bo->darwin_class) {
++      struct darwin_bo_class *c = &retire->classes[bo->darwin_class - 1];
++      const uint64_t bytes = bo->darwin_alloc_size ? bo->darwin_alloc_size : bo->size;
++      c->bytes -= MIN2(bytes, c->bytes);
++      c->count -= !!c->count;
++   }
+    darwin_reap_locked(dev, retire);
+    if (retire->count == retire->capacity && retire->failure == VK_SUCCESS) {
+       /* The ring grows, its records in order from the head. */

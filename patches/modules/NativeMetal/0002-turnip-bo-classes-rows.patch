@@ -1,0 +1,32 @@
+diff --git a/NativeBridgeMetalFrontend.mm b/NativeBridgeMetalFrontend.mm
+--- a/NativeBridgeMetalFrontend.mm
++++ b/NativeBridgeMetalFrontend.mm
+@@ -4319,6 +4319,28 @@
+     modeStats(rm);
+     row("RM gmem %llu %lluM | sys auto %llu %lluM other %llu %lluM | exact %llu",(unsigned long long)rm[0],(unsigned long long)(rm[1]/1000),
+      (unsigned long long)rm[2],(unsigned long long)(rm[3]/1000),(unsigned long long)rm[4],(unsigned long long)(rm[5]/1000),(unsigned long long)rm[6]);
++   }
++  }
++  // pdx203: Turnip's live BOs by name (tu_darwin_bo_classes, patches/mesa/turnip-darwin-bo-classes.patch), "name=MiB/count/peak MiB",
++  // most bytes first, after the freed ones still in flight (q): usb-146 filled the window with some 600 MiB of Turnip's own. Two rows.
++  {
++   static void *turnipBo=gLoaderPath.empty()?nullptr:dlopen(gLoaderPath.c_str(),RTLD_NOW|RTLD_NOLOAD);
++   static size_t (*boClasses)(char *,size_t)=turnipBo?(size_t (*)(char *,size_t))dlsym(turnipBo,"tu_darwin_bo_classes"):nullptr;
++   if(boClasses) {
++    char text[1024];boClasses(text,sizeof text);
++    // Packs whole entries into rows of at most 86 characters after the tag.
++    const char *tags[2]={"TB","TBb"};const char *at=text;
++    for(unsigned r=0;r<2 && *at;r++) {
++     char line[96];size_t n=0;
++     while(*at) {
++      const char *end=strchr(at,' ');size_t len=end?(size_t)(end-at):strlen(at);
++      if(n && n+1+len>86)break;
++      if(len>86)len=86;
++      if(n)line[n++]=' ';
++      memcpy(line+n,at,len);n+=len;at+=len;while(*at==' ')at++;
++     }
++     line[n]=0;row("%s %s",tags[r],line);
++    }
+    }
+   }
+   // Who allocated the device memory (4 MiB or more at once): the three call stacks with the most bytes, as MiB, allocations and return
