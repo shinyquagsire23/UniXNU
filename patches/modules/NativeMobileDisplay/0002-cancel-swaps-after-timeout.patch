@@ -73,18 +73,19 @@ index 3857cfb..d351b28 100644
      if(NativeGOPPresenter *p=OSDynamicCast(NativeGOPPresenter,presenter))p->setMemorySource(nub);
  }
 diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
-index 2291925..9318df3 100644
+index 2291925..64fc375 100644
 --- a/NativeLegacyDisplay.cpp
 +++ b/NativeLegacyDisplay.cpp
-@@ -8,6 +8,7 @@
+@@ -8,6 +8,8 @@
  #include <IOKit/IOWorkLoop.h>
  #include <IOKit/IOTimerEventSource.h>
  #include <kern/clock.h>
 +#include <kern/thread.h>
++#include <kern/thread_call.h>
  #include <IOKit/pwr_mgt/IOPM.h>
  #include <IOKit/pwr_mgt/IOPMpowerState.h>
  #include <libkern/c++/OSData.h>
-@@ -49,6 +50,32 @@ extern "C" void native_legacy_retirement_observed(IOService *);
+@@ -49,6 +51,36 @@ extern "C" void native_legacy_retirement_observed(IOService *);
  // client reports the GPU copy done (native_legacy_gpu_complete). A refused offer or a failed copy uses the CPU copy below and is counted.
  extern "C" bool native_legacy_gpu_offer(void *display,IOMemoryDescriptor *,uint64_t stride,uint32_t width,uint32_t height);
  extern "C" void native_legacy_gpu_fallback_observed(int status);
@@ -94,6 +95,9 @@ index 2291925..9318df3 100644
 +// Swaps the family gave up on after waiting 5 s (cancelSwapsAfterTimeout), and retirements refused because the family no longer queued
 +// the request (the latch is dropped then instead of holding every later frame back).
 +extern "C" {volatile uint32_t native_legacy_swap_timeouts,native_legacy_orphan_retires,native_legacy_gpu_dropped;}
++// CPU copies run on a thread call outside the work loop's gate (pdx203-cpu-async, default 1): copies started, those that failed and dropped
++// their frame, and the longest one (us, map to retirement request).
++extern "C" {volatile uint32_t native_legacy_async_copies,native_legacy_async_drops;volatile uint64_t native_legacy_async_max_us;}
 +// Who is inside the display's work-loop gate, and where. usb-159: backboardd's display thread waited 0.3 to 1.4 s in a no-block SwapWait
 +// (which never sleeps in the family: it waited for the gate) while its GPU hand-off thread sat in COMPLETE_SWAP; both ended, with one
 +// swap retired, only when backboardd's watchdog killed it. Lane 0 is the GPU completion (gpuComplete), lane 1 the family's kicks and
@@ -102,7 +106,8 @@ index 2291925..9318df3 100644
 +//   lane 0: 1 asking for the gate, 2 in it, 3 flip committed, 4 retiring (family completion), 5 retired, 6 kicking the next, 7 kicked
 +//   lane 1: 10 kick, 14 retiring, 15 retired, 20 vsync send
 +//   both lanes inside kickOnce (usb-163: lane 0's longest stage was the whole kick, 853 ms): 21 entered, 22 prepare scanout,
-+//   11 GPU offer, 23 offered, 24 source mapped, 12 scans and copy timer, 25 flip target (GPU idle wait), 26 CPU copy, 13 copied
++//   11 GPU offer, 23 offered, 24 source mapped, 12 scans and copy timer, 25 flip target (GPU idle wait), 26 CPU copy, 13 copied,
++//   27 CPU copy handed to its thread call, 28 its retirement (pdx203-cpu-async)
 +// native_legacy_gate_max: each lane's longest stage so far (usb-161: the current stage alone was overwritten when the stall ended at the
 +// kill): the stage, how long it lasted (mach time), the thread.
 +extern "C" {volatile uint64_t native_legacy_gate_lane[2][3],native_legacy_gate_max[2][3];}
@@ -117,7 +122,7 @@ index 2291925..9318df3 100644
  // Display refresh tick (boot-arg sheng-vsync=<Hz>, 0 or absent: off). The original family sends the compositor's vsync message (type 5)
  // through native_legacy_vsync_notify, the unchanged original sender, but only a platform subclass calls it from the panel's vblank and
  // that subclass is not part of this port: without it the render server never saw a vsync. The GOP scanout has no vblank interrupt, so a
-@@ -114,7 +141,10 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
+@@ -114,7 +146,10 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
          if(!vsyncTimer)return;
          if(!vsyncWanted()){native_legacy_vsync_observed(2,vsyncHz);return;}
          const uint64_t now=mach_absolute_time();
@@ -128,7 +133,7 @@ index 2291925..9318df3 100644
          native_legacy_vsync_observed(1,vsyncHz);
          vsyncNext+=vsyncInterval;
          if(vsyncNext<=now){vsyncNext=now+vsyncInterval;native_legacy_vsync_observed(3,vsyncHz);}
-@@ -143,11 +173,22 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
+@@ -143,15 +178,26 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
      }
  public:
      // Called by the GPU client's completion (any thread): the swap is finished on the framebuffer's work loop.
@@ -153,7 +158,20 @@ index 2291925..9318df3 100644
          };
          if(loop)loop->runAction(action,this,&args);else finishGpuSwap(status);
      }
-@@ -236,14 +277,17 @@ public:
+-    void free() override {stopVsync();if(logicalPM){PMstop();logicalPM=false;}primary=false;OSSafeReleaseNULL(bootMapping);IOMobileFramebufferLegacy::free();}
++    void free() override {if(cpuCall){thread_call_cancel_wait(cpuCall);thread_call_free(cpuCall);cpuCall=nullptr;}stopVsync();if(logicalPM){PMstop();logicalPM=false;}primary=false;OSSafeReleaseNULL(bootMapping);IOMobileFramebufferLegacy::free();}
+     void stop(IOService *provider) override {
+         stopVsync();
+         transferred=false;for(auto &entry: validated)entry=nullptr;gpuRequest=nullptr;gpuRetired=false;
+@@ -170,6 +216,7 @@ public:
+     }
+     bool start(IOService *provider) override {
+         if(!startDisplay(provider))return false;
++        if(!cpuCall)cpuCall=thread_call_allocate(&NativeLegacyDisplay::cpuCopyEntry,this);
+         startVsync();return true;
+     }
+     bool startDisplay(IOService *provider) {
+@@ -236,14 +283,17 @@ public:
          armVsync();
          if(kicking){rekick=true;return;}
          kicking=true;
@@ -171,7 +189,7 @@ index 2291925..9318df3 100644
          unsigned enabled=0;PE_parse_boot_argn("offline-legacy-transfer",&enabled,sizeof(enabled));
          if(enabled!=1 || transferred || !logicalPM || !bootMapping || !primary)return;
          const OriginalLegacySwapRequest *request=pendingSwapRequest();
-@@ -303,14 +347,17 @@ public:
+@@ -303,14 +353,17 @@ public:
          // The diagnostic renderer repaints the page over the scanout until it is told the system owns the display; the GPU path needs that as much
          // as the CPU copy (int-093: accepted swaps were GPU-copied under a page that kept drawing).
          if(!gpuBypass) {
@@ -189,15 +207,30 @@ index 2291925..9318df3 100644
              shadowValid=false;gpuRequest=request;gpuLength=length;transferred=true;
              // The compositor renders its next frame only after this swap retires, so retiring at the end of the copy and flip made every
              // frame its render plus the copy and the flip's wait (pdx203 usb-146: about 24 presents a second with the GPU 25-50 % busy).
-@@ -325,6 +372,7 @@ public:
+@@ -325,6 +378,22 @@ public:
              }
              return;
          }
++        // usb-165/166: mapping a frame's surface for the CPU copy (and reading it) can take seconds (stage 24: 2 s after a failed GPU copy,
++        // 0.8 s for a frame the GPU never took, while Safari opened), and inside this gate that stalled backboardd's display thread until
++        // its watchdog killed it. The copy runs on a thread call instead: the frame stays in flight (transferred) until finishCpuCopy
++        // retires it under the gate; a failed copy drops it. Only one runs at a time.
++        if(cpuCall && cpuAsync()) {
++            if(cpuBusy)return;
++            memory->retain();
++            cpuMemory=memory;cpuRequest=request;cpuStride=sourceStride;cpuAllocation=allocation;cpuLength=length;cpuXr10=xr10;
++            cpuWidth=width;cpuHeight=height;cpuRowBytes=video.v_rowBytes;cpuBusy=true;
++            transferred=true;shadowValid=false;
++            native_legacy_async_copies=native_legacy_async_copies+1;
++            gateStage(lane(),27);
++            thread_call_enter(cpuCall);
++            return;
++        }
 +        gateStage(lane(),24);
          IOMemoryMap *source=memory->map(kIOMapAnywhere|kIOMapReadOnly);
          if(!source || !source->getVirtualAddress() || source->getLength()<allocation) {
              OSSafeReleaseNULL(source);native_legacy_transfer_observed(kIOReturnNoMemory,request,0);return;
-@@ -347,12 +395,15 @@ public:
+@@ -347,12 +416,15 @@ public:
          if(!native_legacy_prepare_scanout()) {
              OSSafeReleaseNULL(source);native_legacy_transfer_observed(kIOReturnNotReady,request,0);return;
          }
@@ -213,7 +246,7 @@ index 2291925..9318df3 100644
          volatile void *destination=flipDest ? flipDest : reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress());
          const uint64_t destinationBytes=flipDest ? flipBytes : bootMapping->getLength();
          {
-@@ -383,6 +434,7 @@ public:
+@@ -383,9 +455,71 @@ public:
          if(flipDest)native_legacy_flip_commit();
          {uint64_t copyEnd;__asm__ volatile("isb\n\tmrs %0, cntpct_el0":"=r"(copyEnd));native_legacy_copy_timing_observed(copyEnd-copyStart,stored);}
          OSSafeReleaseNULL(source);transferred=true;
@@ -221,7 +254,71 @@ index 2291925..9318df3 100644
          native_legacy_transfer_observed(kIOReturnSuccess,request,length);
          finishTransfer(request);
      }
-@@ -398,41 +450,106 @@ public:
++    thread_call_t cpuCall=nullptr;
++    bool cpuBusy=false,cpuXr10=false;
++    const OriginalLegacySwapRequest *cpuRequest=nullptr;
++    IOMemoryDescriptor *cpuMemory=nullptr;
++    uint64_t cpuStride=0,cpuAllocation=0,cpuLength=0,cpuRowBytes=0;
++    uint32_t cpuWidth=0,cpuHeight=0;
++    static bool cpuAsync() {static int on=-1;if(on<0){unsigned v=1;PE_parse_boot_argn("pdx203-cpu-async",&v,sizeof v);on=(v!=0);}return on;}
++    static void cpuCopyEntry(thread_call_param_t self,thread_call_param_t) {static_cast<NativeLegacyDisplay *>(self)->cpuCopyRun();}
++    // Outside the gate. The parameters were set under it and nothing changes them before finishCpuCopy (cpuBusy and transferred hold
++    // every other copy back); the flip target is the back buffer, which no committed flip shows.
++    void cpuCopyRun() {
++        const uint64_t began=mach_absolute_time();
++        IOReturn status=kIOReturnSuccess;bool flipped=false;
++        IOMemoryMap *source=cpuMemory?cpuMemory->map(kIOMapAnywhere|kIOMapReadOnly):nullptr;
++        if(!source || !source->getVirtualAddress() || source->getLength()<cpuAllocation)status=kIOReturnNoMemory;
++        else if(!native_legacy_copy_layout(reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress()),bootMapping->getLength(),cpuRowBytes,
++                    reinterpret_cast<const void *>(source->getVirtualAddress()),source->getLength(),cpuStride,cpuWidth,cpuHeight))status=kIOReturnBadArgument;
++        else if(!native_legacy_prepare_scanout())status=kIOReturnNotReady;
++        else {
++            uint64_t copyStart;__asm__ volatile("isb\n\tmrs %0, cntpct_el0":"=r"(copyStart));
++            uint64_t flipBytes=0;
++            volatile void *flipDest=flipTarget(&flipBytes);
++            volatile void *destination=flipDest ? flipDest : reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress());
++            const uint64_t destinationBytes=flipDest ? flipBytes : bootMapping->getLength();
++            if(!(cpuXr10 ? native_legacy_copy_xr10 : native_legacy_copy_pixels)(destination,destinationBytes,cpuRowBytes,
++                reinterpret_cast<const void *>(source->getVirtualAddress()),source->getLength(),cpuStride,cpuWidth,cpuHeight))status=kIOReturnBadArgument;
++            else {
++                __asm__ volatile("dsb sy" ::: "memory");
++                flipped=flipDest!=nullptr;
++                uint64_t copyEnd;__asm__ volatile("isb\n\tmrs %0, cntpct_el0":"=r"(copyEnd));native_legacy_copy_timing_observed(copyEnd-copyStart,cpuLength);
++            }
++        }
++        OSSafeReleaseNULL(source);
++        uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time()-began,&ns);
++        if(ns/1000>native_legacy_async_max_us)native_legacy_async_max_us=ns/1000;
++        struct Args {NativeLegacyDisplay *display;IOReturn status;bool flipped;} args={this,status,flipped};
++        auto action=[](OSObject *,void *a0,void *,void *,void *)->IOReturn {
++            Args *a=static_cast<Args *>(a0);a->display->finishCpuCopy(a->status,a->flipped);return kIOReturnSuccess;
++        };
++        if(IOWorkLoop *loop=getWorkLoop())loop->runAction(action,this,&args);else finishCpuCopy(status,flipped);
++    }
++    // Under the gate: show and retire the copied frame, or drop it. A request the family cancelled meanwhile (cancelSwapsAfterTimeout)
++    // is gone: only the memory is released.
++    void finishCpuCopy(IOReturn status,bool flipped) {
++        const OriginalLegacySwapRequest *request=cpuRequest;IOMemoryDescriptor *memory=cpuMemory;
++        cpuRequest=nullptr;cpuMemory=nullptr;cpuBusy=false;
++        gateStage(lane(),28);
++        if(request) {
++            if(status==kIOReturnSuccess) {
++                if(flipped)native_legacy_flip_commit();
++                native_legacy_transfer_observed(kIOReturnSuccess,request,cpuLength);
++                finishTransfer(request);
++            } else {
++                native_legacy_transfer_observed(status,request,0);
++                native_legacy_async_drops=native_legacy_async_drops+1;
++                finishTransfer(request,true);
++            }
++        } else if(!transferred) kickSwapQueue();
++        OSSafeReleaseNULL(memory);
++        gateStage(lane(),0);
++    }
+     // The GPU client reported its copy (status 0) or lost it. Success retires the swap like a finished copy; anything else uses the CPU copy.
+     void finishGpuSwap(int status) {
+         const OriginalLegacySwapRequest *request=gpuRequest;
+@@ -398,41 +532,107 @@ public:
              if(status==0) {
                  if(gpuFlip)native_legacy_flip_commit();
                  native_legacy_transfer_observed(kIOReturnSuccess,request,gpuLength);
@@ -327,12 +424,13 @@ index 2291925..9318df3 100644
 +        troubleReport("cancel",gpuRequest);
 +        for(auto &entry: validated)entry=nullptr;
 +        gpuRequest=nullptr;gpuRetired=false;transferred=false;gpuBypass=false;
++        cpuRequest=nullptr;   // a CPU copy still running finds no request; its memory is released when it ends (cpuBusy stays until then)
 +        return true;
 +    }
      IOReturn collectCompletionReports(uint32_t,void *,uint32_t *count,uint32_t) override {
          // The original completion helper passes null optional outputs and
          // ignores this IOReturn. GOP exposes no hardware completion telemetry.
-@@ -547,9 +664,23 @@ public:
+@@ -547,9 +747,23 @@ public:
      LEAF(306)
      LEAF(307)
      LEAF(338)
