@@ -1,7 +1,19 @@
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -4180,6 +4180,8 @@
+    }
+ 
+    tu_cs_init(&cmd_buffer->cs, device, TU_CS_MODE_GROW, 4096, "cmd cs");
++   /* pdx203: nothing else points into a primary's own stream (tu_cs.h release_large_on_reset). */
++   cmd_buffer->cs.release_large_on_reset = cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    tu_cs_init(&cmd_buffer->draw_cs, device, TU_CS_MODE_GROW, 4096, "draw cs");
+    tu_cs_init(&cmd_buffer->tile_store_cs, device, TU_CS_MODE_GROW, 2048, "tile store cs");
+    tu_cs_init(&cmd_buffer->draw_epilogue_cs, device, TU_CS_MODE_GROW, 4096, "draw epilogue cs");
 diff --git a/src/freedreno/vulkan/tu_cs.cc b/src/freedreno/vulkan/tu_cs.cc
 --- a/src/freedreno/vulkan/tu_cs.cc
 +++ b/src/freedreno/vulkan/tu_cs.cc
-@@ -612,6 +612,22 @@
+@@ -612,6 +612,23 @@
        cs->start = cs->cur = cs->reserved_end = (uint32_t *) cs->read_only.bos[0]->map;
        cs->end = cs->start + tu_sanitize_ib_size(cs->read_only.bos[0]->size /
                                                  sizeof(uint32_t));
@@ -11,9 +23,10 @@ diff --git a/src/freedreno/vulkan/tu_cs.cc b/src/freedreno/vulkan/tu_cs.cc
 +       * pool it made and begins a spare's primary ahead (metal2vulkan spares.rs), so its idle command buffers held them: the render
 +       * server's "cmd cs" BOs came to 299 MiB in 447 BOs, a third of its 1 GiB GPU window. A kept BO over 64 KiB goes back too (to the
 +       * kernel connection's BO cache once its last submission retires), and the next one is no larger than it was: a large recording
-+       * grows again in one BO. */
++       * grows again in one BO. Only a stream that asks (release_large_on_reset, a primary's "cmd cs"): sa14 released every stream's and
++       * froze entering Settings, a primary submitting entries of a reset secondary's draw stream whose BO was gone. */
 +      const uint64_t keep_bytes = 64 * 1024;
-+      if (cs->mode == TU_CS_MODE_GROW && cs->read_only.bos[0]->size > keep_bytes) {
++      if (cs->release_large_on_reset && cs->mode == TU_CS_MODE_GROW && cs->read_only.bos[0]->size > keep_bytes) {
 +         const uint32_t dwords = tu_sanitize_ib_size(cs->read_only.bos[0]->size / sizeof(uint32_t));
 +         TU_RMV(resource_destroy, cs->device, cs->read_only.bos[0]);
 +         tu_bo_finish(cs->device, cs->read_only.bos[0]);
@@ -24,3 +37,16 @@ diff --git a/src/freedreno/vulkan/tu_cs.cc b/src/freedreno/vulkan/tu_cs.cc
     }
  
     if (cs->read_write.bo_count) {
+diff --git a/src/freedreno/vulkan/tu_cs.h b/src/freedreno/vulkan/tu_cs.h
+--- a/src/freedreno/vulkan/tu_cs.h
++++ b/src/freedreno/vulkan/tu_cs.h
+@@ -124,6 +124,9 @@
+     * was asserted away and the packets were written past the end of the last BO (r2d_coords in the render server, usb-131..143). */
+    VkResult error;
+    struct tu_cs_sink *sink;
++   /* pdx203: tu_cs_reset releases a kept BO over 64 KiB (tu_cs.cc). Only for a primary command buffer's own stream: a secondary's
++    * draw streams are copied into primaries as entries that point at its BOs without owning them (tu_CmdExecuteCommands). */
++   bool release_large_on_reset;
+ 
+    tu_crb crb(uint32_t nregs);
+ };
