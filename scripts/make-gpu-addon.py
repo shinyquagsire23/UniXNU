@@ -173,6 +173,11 @@ def main():
         files.append(('usrbin/IOMFB_FDR_Loader', 0o755, (oslog / 'IOMFB_FDR_Loader').read_bytes()))
         if (oslog / 'filter.txt').is_file():
             files.append(('oslog/filter.txt', 0o644, (oslog / 'filter.txt').read_bytes()))
+        # The unified log's system preferences with private data on: the kernel overlays logging/ on /Library/Preferences/Logging
+        # (zzy-zoslog-addon-mount mount7), so the forwarded lines carry what logd otherwise redacts as <private>.
+        import plistlib
+        files.append(('logging/com.apple.system.logging.plist', 0o644,
+                      plistlib.dumps({'Enable-Private-Data': True}, fmt=plistlib.FMT_BINARY)))
     if wifi:
         for path in sorted(p for p in wifi.iterdir() if p.is_file()):
             files.append(('wifi/' + path.name, 0o644, path.read_bytes()))

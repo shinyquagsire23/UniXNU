@@ -1,30 +1,36 @@
---- a/bsd/kern/kern_exec.c	2026-11-02 22:22:59
-+++ b/bsd/kern/kern_exec.c	2026-11-02 22:22:59
-@@ -7220,6 +7220,11 @@
+--- a/bsd/kern/kern_exec.c	2026-11-02 23:15:29
++++ b/bsd/kern/kern_exec.c	2026-11-02 23:15:29
+@@ -7220,6 +7220,15 @@
  volatile int native_gpu_addon4_status = -1;
  volatile int native_gpu_addon5_stage = 0;
  volatile int native_gpu_addon5_status = -1;
 +/* The board's user-space log forwarder (UniXNU-pdx203 OsLogConsole) in place of /usr/bin/IOMFB_FDR_Loader, which launchd starts at boot
 + * from its cache and which only exits with status 1 here (mount6 below). Its CDHash is in the owner trust cache; its launch constraints are
-+ * those of the Apple program it replaces and can never match a file on owner Data, so it is let through as the cryptex overlay's are. */
++ * those of the Apple program it replaces and can never match a file on owner Data, so it is let through as the cryptex overlay's are.
++ * mount7: the unified log's system preferences (com.apple.system.logging.plist, Enable-Private-Data) over /Library/Preferences/Logging,
++ * so the forwarded lines carry the arguments logd otherwise redacts as <private>. */
 +volatile int native_gpu_addon6_stage = 0;
 +volatile int native_gpu_addon6_status = -1;
++volatile int native_gpu_addon7_stage = 0;
++volatile int native_gpu_addon7_status = -1;
  /* Executables reached through the App cryptex overlay (the bindfs mount on /System/Cryptexes, mount4 below): their code is checked
   * against the boot trust cache like any other, but AMFI's launch constraints (on-authorized-authapfs-volume and the category it gives
   * these Apple programs, c[8] even with an owner trust entry of category 0) can never match a file on owner Data, so every Safari service
-@@ -7232,7 +7237,10 @@
+@@ -7232,9 +7241,12 @@
  		return 0;
  	}
  	struct vfsstatfs *sp = vfs_statfs(vnode_mount(vp));
 -	if (strcmp(sp->f_fstypename, "bindfs") || strcmp(sp->f_mntonname, "/System/Cryptexes")) {
 +	if (strcmp(sp->f_fstypename, "bindfs")) {
-+		return 0;
-+	}
-+	if (strcmp(sp->f_mntonname, "/System/Cryptexes") && (native_gpu_addon6_stage < 3 || strcmp(sp->f_mntonname, "/usr/bin"))) {
  		return 0;
  	}
++	if (strcmp(sp->f_mntonname, "/System/Cryptexes") && (native_gpu_addon6_stage < 3 || strcmp(sp->f_mntonname, "/usr/bin"))) {
++		return 0;
++	}
  	native_gpu_addon_cryptex_execs++;
-@@ -7588,6 +7596,10 @@
+ 	return 1;
+ }
+@@ -7588,6 +7600,15 @@
  	native_gpu_addon_mount(p, scratch, 0xc00, audio_source, sizeof(audio_source), audio_point, sizeof(audio_point),
  	    "/System/Library/Audio/Plug-Ins/HAL/BuiltinAudioPlugin.driver", "/System/Library/Audio/Plug-Ins/HAL/ShengAudio.driver/Info.plist",
  	    &native_gpu_addon5_stage, &native_gpu_addon5_status);
@@ -32,6 +38,11 @@
 +	static const char usrbin_source[] = "/private/var/ngpu/usrbin", usrbin_point[] = "/usr/bin";
 +	native_gpu_addon_mount(p, scratch, 0xe00, usrbin_source, sizeof(usrbin_source), usrbin_point, sizeof(usrbin_point),
 +	    "/usr/bin/IOMFB_FDR_Loader", "/usr/bin/IOMFB_FDR_Loader", &native_gpu_addon6_stage, &native_gpu_addon6_status);
++	/* The unified log's preferences (native_gpu_addon7_stage). Scratch slot 0xe40: type 0xe40, path 0xe60, data 0xf40 (clear of 0xe00's). */
++	static const char logging_source[] = "/private/var/ngpu/logging", logging_point[] = "/Library/Preferences/Logging";
++	native_gpu_addon_mount(p, scratch, 0xe40, logging_source, sizeof(logging_source), logging_point, sizeof(logging_point),
++	    "/Library/Preferences/Logging/Subsystems", "/Library/Preferences/Logging/com.apple.system.logging.plist", &native_gpu_addon7_stage,
++	    &native_gpu_addon7_status);
  }
  
  /* The deletable system apps (Weather, Notes, Calendar, ...) ship in the OS volume's /private/var/staged_system_apps. A restore copies
