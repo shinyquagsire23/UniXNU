@@ -1,0 +1,45 @@
+diff --git a/NativeAdrenoPublish.cpp b/NativeAdrenoPublish.cpp
+index 968ed28..48d3a26 100644
+--- a/NativeAdrenoPublish.cpp
++++ b/NativeAdrenoPublish.cpp
+@@ -116,10 +116,15 @@ char native_adreno_plugin_steps[8][48];
+  * wallpaper, iconservicesagent for the icons, WidgetRenderer_Default for the widgets: int-196's screen pictures showed a black wallpaper and white widget
+  * boxes, none of which had a native device), 170 MiB each (page aligned). int-198: iconservicesagent reached 128 MiB into its window and then lost its
+  * Metal device; whether the window is the cause is what the [gpu windows] log row decides before these sizes change. */
++/* pdx203 usb-182: the render server's 1 GiB filled (runtime ~550 MiB, imports ~160 MiB, streams ~40 MiB; 292 placements failed) and
++ * full-screen textures were refused. Slot 0 now starts at 64 MiB, above the GMEM window at 0 and the kernel buffers at 32 MiB, and
++ * reaches the other slots at 0x60000000: 1472 MiB. */
+ enum : unsigned {NativeAdrenoMaxClients=4};
+ static const struct {uint64_t start,bytes;} kClientWindows[NativeAdrenoMaxClients]={
+-    {0x20000000ull,0x40000000ull},{0x60000000ull,0x0AAA9000ull},{0x6AAA9000ull,0x0AAA9000ull},{0x75552000ull,0x0AAA9000ull}};
++    {0x04000000ull,0x5C000000ull},{0x60000000ull,0x0AAA9000ull},{0x6AAA9000ull,0x0AAA9000ull},{0x75552000ull,0x0AAA9000ull}};
+ 
++/* pdx203 0005: native_adreno_note_property_read's log of other processes' reads. */
++extern "C" {char native_adreno_property_log[16][48];uint32_t native_adreno_property_log_repeat[16];volatile uint32_t native_adreno_property_log_count;}
+ namespace {
+ void shiftName(char names[3][17]) {
+     memcpy(names[2], names[1], 17);
+@@ -745,6 +750,23 @@ extern "C" void native_adreno_note_property_read(const char *key)
+     }
+     shiftName(native_adreno_metal_diag.reader);
+     native_adreno_metal_diag.property_reads=native_adreno_metal_diag.property_reads+1;
++    /* pdx203: the newest 16 reads by processes other than the render server, "<process> <key>", newest first, with a repeat count
++     * (WebKit.GPU reads MetalPluginName and never runs the plugin: which keys Metal reads before it gives up). */
++    char name[20]={};
++    proc_selfname(name,sizeof name);
++    if(key && strcmp(name,"backboardd")) {
++        char entry[48];
++        snprintf(entry,sizeof entry,"%.19s %.27s",name,key);
++        if(!strncmp(native_adreno_property_log[0],entry,sizeof entry))native_adreno_property_log_repeat[0]=native_adreno_property_log_repeat[0]+1;
++        else {
++            for(unsigned i=15;i>0;--i) {
++                for(unsigned j=0;j<48;++j)native_adreno_property_log[i][j]=native_adreno_property_log[i-1][j];
++                native_adreno_property_log_repeat[i]=native_adreno_property_log_repeat[i-1];
++            }
++            strlcpy(native_adreno_property_log[0],entry,sizeof native_adreno_property_log[0]);native_adreno_property_log_repeat[0]=1;
++        }
++        native_adreno_property_log_count=native_adreno_property_log_count+1;
++    }
+ }
+ IOReturn NativeAdrenoGpuPublished::newUserClient(task_t owningTask,void *securityID,UInt32 type,
+     OSDictionary *properties,IOUserClient **handler)
