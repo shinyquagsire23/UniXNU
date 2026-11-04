@@ -15,11 +15,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'build/adreno-metal-plugin'
 # The board's changes to the NativeMetal module ride as patches (patches/modules/NativeMetal/*.patch, in name order) rather than as commits
-# of the submodule, which a submodule update would leave behind. One already applied is left alone; one that applies neither way stops the build.
-for module_patch in sorted((ROOT / 'patches/modules/NativeMetal').glob('*.patch')):
-    module = ROOT / 'drivers/NativeMetal'
-    if subprocess.run(['git', '-C', module, 'apply', '--reverse', '--check', module_patch], capture_output=True).returncode == 0:
-        continue
+# of the submodule, which a submodule update would leave behind. They apply as a stack (as NativeAdreno's, build-pdx203-adreno.py): the
+# applied part is the longest prefix whose last patch reverses (a later patch may change an earlier one's lines, so an earlier one alone
+# need not reverse); one that applies neither way stops the build.
+module = ROOT / 'drivers/NativeMetal'
+module_patches = sorted((ROOT / 'patches/modules/NativeMetal').glob('*.patch'))
+applied = 0
+for k in range(len(module_patches), 0, -1):
+    if subprocess.run(['git', '-C', module, 'apply', '--reverse', '--check', module_patches[k - 1]], capture_output=True).returncode == 0:
+        applied = k
+        break
+for module_patch in module_patches[applied:]:
     subprocess.run(['git', '-C', module, 'apply', module_patch], check=True)
     print('applied', module_patch.name, 'to drivers/NativeMetal')
 bundle = OUT / 'NativeAdrenoMetal.bundle'
