@@ -1,5 +1,5 @@
 diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
-index 5732b96..58e1ee4 100644
+index 5732b96..bf23d6c 100644
 --- a/src/freedreno/vulkan/tu_cmd_buffer.cc
 +++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
 @@ -4179,6 +4179,7 @@ tu_create_cmd_buffer(struct vk_command_pool *pool,
@@ -10,7 +10,7 @@ index 5732b96..58e1ee4 100644
     tu_cs_init(&cmd_buffer->cs, device, TU_CS_MODE_GROW, 4096, "cmd cs");
     tu_cs_init(&cmd_buffer->draw_cs, device, TU_CS_MODE_GROW, 4096, "draw cs");
     tu_cs_init(&cmd_buffer->tile_store_cs, device, TU_CS_MODE_GROW, 2048, "tile store cs");
-@@ -4195,12 +4196,58 @@ tu_create_cmd_buffer(struct vk_command_pool *pool,
+@@ -4195,12 +4196,59 @@ tu_create_cmd_buffer(struct vk_command_pool *pool,
     return VK_SUCCESS;
  }
  
@@ -18,18 +18,19 @@ index 5732b96..58e1ee4 100644
 + * (tu_darwin_cs_stats): resets, resets of one a queue submission still held (vk_command_buffer::pdx203_queued, the runtime's deferred
 + * submits included), resets of one whose last submission the GPU had not finished, then frees and the same two for them, resets that
 + * found the primary's stream holding over 64 KiB, submission entries that named a freed BO (tu_knl_darwin.cc), then the streams' BOs
-+ * the idle resets released (tu_cs.cc), and resets of a secondary whose last primary submission was still running, which waited. Either kind of early reset rewrites (or frees) a
-+ * stream the GPU is still to run. */
-+uint64_t tu_pdx203_cs_stats[10];
++ * the idle resets released (tu_cs.cc), and resets of a secondary whose last primary submission was still running, which waited, then
++ * BOs freed while a submission was being made and those of them it named (tu_knl_darwin.cc darwin_submit_names). Either kind of
++ * early reset rewrites (or frees) a stream the GPU is still to run. */
++uint64_t tu_pdx203_cs_stats[12];
 +#ifndef PDX203_RELEASE_IDLE_BOS
-+#define PDX203_RELEASE_IDLE_BOS 0   /* A/B (usb-175/177 GPU faults): counted, not released */
++#define PDX203_RELEASE_IDLE_BOS 1   /* sa36 (0) filled the GPU pool: 324 MiB of "cmd cs" in backboardd, usb-179 */
 +#endif
 +
-+extern "C" __attribute__((visibility("default"))) void tu_darwin_cs_stats(uint64_t out[10]);
++extern "C" __attribute__((visibility("default"))) void tu_darwin_cs_stats(uint64_t out[12]);
 +extern "C" __attribute__((visibility("default"))) void
-+tu_darwin_cs_stats(uint64_t out[10])
++tu_darwin_cs_stats(uint64_t out[12])
 +{
-+   for (unsigned i = 0; i < 10; i++)
++   for (unsigned i = 0; i < 12; i++)
 +      out[i] = p_atomic_read(&tu_pdx203_cs_stats[i]);
 +}
 +
@@ -69,7 +70,7 @@ index 5732b96..58e1ee4 100644
     tu_cs_finish(&cmd_buffer->cs);
     tu_cs_finish(&cmd_buffer->draw_cs);
     tu_cs_finish(&cmd_buffer->tile_store_cs);
-@@ -4288,6 +4335,15 @@ tu_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
+@@ -4288,6 +4336,15 @@ tu_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
         cmd_buffer->vk.record_result = status_check_result;
      }
  
@@ -85,7 +86,7 @@ index 5732b96..58e1ee4 100644
     tu_cs_reset(&cmd_buffer->cs);
     tu_cs_reset(&cmd_buffer->draw_cs);
     tu_cs_reset(&cmd_buffer->tile_store_cs);
-@@ -6350,6 +6406,7 @@ tu_CmdExecuteCommands(VkCommandBuffer commandBuffer,
+@@ -6350,6 +6407,7 @@ tu_CmdExecuteCommands(VkCommandBuffer commandBuffer,
  
     for (uint32_t i = 0; i < commandBufferCount; i++) {
        VK_FROM_HANDLE(tu_cmd_buffer, secondary, pCmdBuffers[i]);
@@ -112,7 +113,7 @@ index 17bebeb..fadfa50 100644
     struct u_trace trace, rp_trace;
  
 diff --git a/src/freedreno/vulkan/tu_cs.cc b/src/freedreno/vulkan/tu_cs.cc
-index 17cc77f..2467d0f 100644
+index 17cc77f..17d9a2e 100644
 --- a/src/freedreno/vulkan/tu_cs.cc
 +++ b/src/freedreno/vulkan/tu_cs.cc
 @@ -34,6 +34,7 @@ tu_cs_init(struct tu_cs *cs,
@@ -123,16 +124,49 @@ index 17cc77f..2467d0f 100644
     cs->name = name;
  }
  
-@@ -575,6 +576,8 @@ tu_cs_reserve_space(struct tu_cs *cs, uint32_t reserved_size)
+@@ -554,8 +555,10 @@ tu_cs_reserve_space(struct tu_cs *cs, uint32_t reserved_size)
+          tu_cs_emit(cs, RENDER_MODE_CP_COND_REG_EXEC_1_DWORDS(0));
+       }
+ 
+-      /* Double the size for the next bo. */
+-      new_size = tu_sanitize_ib_size(new_size << 1);
++      /* Double the size for the next bo. pdx203: up to 128 KiB (usb-180: with doubling unbounded and the last BO kept, the
++       * render server's "cmd cs" peaked at 171 MiB in 448 BOs and the GPU pool ran out again); a longer recording chains more
++       * BOs, and its reset frees all but the last. */
++      new_size = MIN2(tu_sanitize_ib_size(new_size << 1), MAX2(32u * 1024u, cs->initial_bo_size));
+       if (cs->next_bo_size < new_size)
+          cs->next_bo_size = new_size;
+    }
+@@ -575,6 +578,8 @@ tu_cs_reserve_space(struct tu_cs *cs, uint32_t reserved_size)
   * Reset a command stream to its initial state.  This discards all comand
   * packets in \a cs, but does not necessarily release all resources.
   */
-+extern uint64_t tu_pdx203_cs_stats[10];
++extern uint64_t tu_pdx203_cs_stats[12];
 +
  void
  tu_cs_reset(struct tu_cs *cs)
  {
-@@ -612,7 +615,23 @@ tu_cs_reset(struct tu_cs *cs)
+@@ -606,13 +611,49 @@ tu_cs_reset(struct tu_cs *cs)
+    assert(!cs->writeable);
+ 
+    if (cs->read_only.bo_count) {
++      /* What the recording that ends here used of the BO kept: all of it where it grew past one BO or failed (cur cleared above). */
++      struct tu_bo *kept = cs->read_only.bos[cs->read_only.bo_count - 1];
++      uint32_t used = kept->size / sizeof(uint32_t);
++      if (cs->read_only.bo_count == 1 && cs->cur && kept->map && cs->cur >= (uint32_t *) kept->map &&
++          cs->cur <= (uint32_t *) kept->map + kept->size / sizeof(uint32_t))
++         used = cs->cur - (uint32_t *) kept->map;
++      if ((uint64_t) used * sizeof(uint32_t) * 4 <= kept->size) {
++         ++cs->small_resets;
++         cs->small_peak = MAX2(cs->small_peak, used);
++      } else {
++         cs->small_resets = 0;
++         cs->small_peak = 0;
++      }
++
+       cs->read_only.bos[0] = cs->read_only.bos[cs->read_only.bo_count - 1];
+       cs->read_only.bo_count = 1;
+ 
        cs->start = cs->cur = cs->reserved_end = (uint32_t *) cs->read_only.bos[0]->map;
        cs->end = cs->start + tu_sanitize_ib_size(cs->read_only.bos[0]->size /
                                                  sizeof(uint32_t));
@@ -142,13 +176,19 @@ index 17cc77f..2467d0f 100644
 +       * (metal2vulkan spares.rs), and the render server's "cmd cs" BOs came to 299 MiB in 447 BOs, a third of its 1 GiB GPU window.
 +       * Only where tu_reset_cmd_buffer found the command buffer idle (no queue submission holds it, its last one retired) and asked:
 +       * sa14..29 released unconditionally and a submission later named a freed BO (usb-170 SUBMITREJ, check 6 handle 0). The BO
-+       * goes back to the kernel connection's cache once its last submission retires (darwin_bo_finish). */
-+      if (cs->release_large_on_reset && cs->mode == TU_CS_MODE_GROW && cs->read_only.bos[0]->size > 64 * 1024) {
++       * goes back to the kernel connection's cache once its last submission retires (darwin_bo_finish).
++       * sa31..35 released at every idle reset, so most frames freed and remade a large BO (usb-177: 3660 of 38262 resets), and
++       * the GPU faulted twice in that churn (usb-175/177). Now a BO goes only once 8 recordings in a row used a quarter of it at
++       * most, and the stream's next BO is twice the most they used: a stream sized for a frame keeps its BO. */
++      if (cs->release_large_on_reset && cs->mode == TU_CS_MODE_GROW && cs->read_only.bos[0]->size > 64 * 1024 &&
++          cs->small_resets >= 8) {
 +         TU_RMV(resource_destroy, cs->device, cs->read_only.bos[0]);
 +         tu_bo_finish(cs->device, cs->read_only.bos[0]);
 +         cs->read_only.bo_count = 0;
 +         cs->start = cs->cur = cs->reserved_end = cs->end = NULL;
-+         cs->next_bo_size = cs->initial_bo_size;
++         cs->next_bo_size = tu_sanitize_ib_size(MAX2(cs->initial_bo_size, util_next_power_of_two(MAX2(cs->small_peak, 1) * 2)));
++         cs->small_resets = 0;
++         cs->small_peak = 0;
 +         p_atomic_inc(&tu_pdx203_cs_stats[8]);
 +      }
     }
@@ -157,44 +197,197 @@ index 17cc77f..2467d0f 100644
     if (cs->read_write.bo_count) {
        cs->read_write.bos[0] = cs->read_write.bos[cs->read_write.bo_count - 1];
 diff --git a/src/freedreno/vulkan/tu_cs.h b/src/freedreno/vulkan/tu_cs.h
-index e51fc78..c3121e2 100644
+index e51fc78..68e0b98 100644
 --- a/src/freedreno/vulkan/tu_cs.h
 +++ b/src/freedreno/vulkan/tu_cs.h
-@@ -125,6 +125,11 @@ struct tu_cs
+@@ -125,6 +125,13 @@ struct tu_cs
     VkResult error;
     struct tu_cs_sink *sink;
  
-+   /* pdx203: set by tu_reset_cmd_buffer for the next tu_cs_reset alone, on an idle primary's "cmd cs": the reset releases a kept BO
-+    * over 64 KiB too, and the stream grows from initial_bo_size again (tu_cs.cc). */
++   /* pdx203: set by tu_reset_cmd_buffer for the next tu_cs_reset alone, on an idle primary's "cmd cs": the reset may release a kept
++    * BO over 64 KiB too, once recordings no longer need it, and the stream grows from what they did use (tu_cs.cc). */
 +   bool release_large_on_reset;
 +   uint32_t initial_bo_size;
++   /* pdx203: resets in a row whose recording used a quarter of the kept BO at most, and the most (dwords) they used (tu_cs.cc). */
++   uint32_t small_resets, small_peak;
 +
     tu_crb crb(uint32_t nregs);
  };
  
 diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
-index 3eb29ed..d087ef7 100644
+index 3eb29ed..03df1ef 100644
 --- a/src/freedreno/vulkan/tu_knl_darwin.cc
 +++ b/src/freedreno/vulkan/tu_knl_darwin.cc
-@@ -1219,6 +1219,8 @@ struct tu_darwin_queue_submit {
-    struct util_dynarray commands; /* NativeAdrenoAbiSubmitBuffer */
+@@ -70,6 +70,7 @@ struct darwin_retired_bo {
+    void *mapping;
+    uint32_t token, fence;
+    bool cacheable, read_only;
++   bool pending;   /* freed while a submission was being made: its fence is that of the last one to end (darwin_submit_window_end) */
  };
  
-+extern uint64_t tu_pdx203_cs_stats[10];
+ /* A freed BO whose fence completed stays whole (kernel handle, GPU mapping, CPU lease) in a size-class cache and is handed to the next
+@@ -113,6 +114,12 @@ struct darwin_bo_class {
+    uint64_t bytes, count, peak;
+ };
+ 
++struct tu_darwin_queue_submit {
++   struct util_dynarray commands; /* NativeAdrenoAbiSubmitBuffer */
++};
 +
++extern uint64_t tu_pdx203_cs_stats[12];
++
+ struct darwin_retire_state {
+    pthread_mutex_t lock;
+    struct darwin_retired_bo *entries;   /* a ring of `capacity` records, grown when full */
+@@ -128,6 +135,10 @@ struct darwin_retire_state {
+    struct darwin_conn conn;   /* this device's kernel connection */
+    struct darwin_bo_class classes[48];   /* the live BOs by name (tu_darwin_bo_classes) */
+    unsigned class_count;
++   /* Submissions being made (darwin_submit_create to darwin_submit_finish): their entries name BOs before the kernel has a fence for
++    * them, so a BO freed meanwhile cannot take the connection's last fence (darwin_bo_finish). */
++   unsigned submitting;
++   struct tu_darwin_queue_submit *active[8];
+ };
+ static struct darwin_retire_state *darwin_stats_state;   /* for tu_darwin_bo_cache_stats */
+ 
+@@ -796,8 +807,8 @@ darwin_reap_locked(struct tu_device *dev, struct darwin_retire_state *retire)
+    unsigned kept = 0;
+    for (unsigned i = 0; i < total; ++i) {
+       struct darwin_retired_bo *bo = &retire->entries[(retire->head + i) % retire->capacity];
+-      bool ready = true;
+-      if (bo->fence) {
++      bool ready = !bo->pending;
++      if (ready && bo->fence) {
+          if (have_pending_fence && bo->fence == pending_fence) {
+             ready = false;
+          } else if (!have_completed_fence || bo->fence != completed_fence) {
+@@ -1149,6 +1160,8 @@ darwin_wait_idle(struct tu_device *dev)
+    return VK_SUCCESS;
+ }
+ 
++static bool darwin_submit_names(struct darwin_retire_state *retire, uint64_t handle);
++
+ static void
+ darwin_bo_finish(struct tu_device *dev, struct tu_bo *bo)
+ {
+@@ -1195,8 +1208,14 @@ darwin_bo_finish(struct tu_device *dev, struct tu_bo *bo)
+       uint32_t fence = dwc(dev)->last_fence;
+       pthread_mutex_unlock(&dwc(dev)->lock);
+       unsigned slot = (retire->head + retire->count) % retire->capacity;
++      const bool pending = retire->submitting != 0;
++      if (pending) {
++         p_atomic_inc(&tu_pdx203_cs_stats[10]);
++         if (darwin_submit_names(retire, bo->darwin_handle))
++            p_atomic_inc(&tu_pdx203_cs_stats[11]);
++      }
+       retire->entries[slot] = {bo->darwin_handle, bo->iova, bo->darwin_alloc_size ? bo->darwin_alloc_size : bo->size, bo->map,
+-                               bo->darwin_token, fence, bo->darwin_alloc_size != 0, bo->darwin_read_only};
++                               bo->darwin_token, fence, bo->darwin_alloc_size != 0, bo->darwin_read_only, pending};
+       ++retire->count;
+       ++retire->enqueued;
+       darwin_reap_locked(dev, retire);
+@@ -1215,21 +1234,72 @@ darwin_bo_finish(struct tu_device *dev, struct tu_bo *bo)
+ 
+ /* ---- submissions ---- */
+ 
+-struct tu_darwin_queue_submit {
+-   struct util_dynarray commands; /* NativeAdrenoAbiSubmitBuffer */
+-};
++/* pdx203: a BO freed while a submission is being made (its entries already name BOs, the kernel has no fence for it yet) is held
++ * until every submission then being made has its fence, and counted in tu_pdx203_cs_stats[10]; [11] counts those a submission being
++ * made named itself, a free the GPU was still to read (tu_cmd_buffer.cc). Called under retire->lock. */
++static bool
++darwin_submit_names(struct darwin_retire_state *retire, uint64_t handle)
++{
++   for (unsigned i = 0; i < ARRAY_SIZE(retire->active); i++) {
++      if (!retire->active[i])
++         continue;
++      util_dynarray_foreach (&retire->active[i]->commands, NativeAdrenoAbiSubmitBuffer, cmd)
++         if (cmd->handle == handle)
++            return true;
++   }
++   return false;
++}
+ 
  static void *
  darwin_submit_create(struct tu_device *device)
  {
-@@ -1242,6 +1244,9 @@ darwin_submit_add_entries(struct tu_device *device, void *_submit,
+-   return vk_zalloc(&device->vk.alloc, sizeof(struct tu_darwin_queue_submit), 8,
+-                    VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
++   struct tu_darwin_queue_submit *submit = (struct tu_darwin_queue_submit *)
++      vk_zalloc(&device->vk.alloc, sizeof(struct tu_darwin_queue_submit), 8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
++   if (!submit)
++      return NULL;
++   struct darwin_retire_state *retire = (struct darwin_retire_state *)device->darwin_retire;
++   pthread_mutex_lock(&retire->lock);
++   ++retire->submitting;
++   for (unsigned i = 0; i < ARRAY_SIZE(retire->active); i++) {
++      if (!retire->active[i]) {
++         retire->active[i] = submit;
++         break;
++      }
++   }
++   pthread_mutex_unlock(&retire->lock);
++   return submit;
++}
++
++/* The submission has its fence (darwin_queue_submit noted it as the connection's last) or never will: once none is being made, the
++ * BOs freed meanwhile take the connection's last fence, which every submission they could be named by is at or before. */
++static void
++darwin_submit_window_end(struct tu_device *device, struct tu_darwin_queue_submit *submit)
++{
++   struct darwin_retire_state *retire = (struct darwin_retire_state *)device->darwin_retire;
++   pthread_mutex_lock(&retire->lock);
++   for (unsigned i = 0; i < ARRAY_SIZE(retire->active); i++)
++      if (retire->active[i] == submit)
++         retire->active[i] = NULL;
++   if (retire->submitting && !--retire->submitting) {
++      pthread_mutex_lock(&dwc(device)->lock);
++      const uint32_t fence = dwc(device)->last_fence;
++      pthread_mutex_unlock(&dwc(device)->lock);
++      for (unsigned i = 0; i < retire->count; i++) {
++         struct darwin_retired_bo *bo = &retire->entries[(retire->head + i) % retire->capacity];
++         if (bo->pending) {
++            bo->pending = false;
++            bo->fence = fence;
++         }
++      }
++   }
++   pthread_mutex_unlock(&retire->lock);
+ }
+ 
+ static void
+ darwin_submit_finish(struct tu_device *device, void *_submit)
+ {
+    struct tu_darwin_queue_submit *submit = (struct tu_darwin_queue_submit *)_submit;
++   darwin_submit_window_end(device, submit);
+    util_dynarray_fini(&submit->commands);
+    vk_free(&device->vk.alloc, submit);
+ }
+@@ -1239,15 +1309,22 @@ darwin_submit_add_entries(struct tu_device *device, void *_submit,
+                           struct tu_cs_entry *entries, unsigned num_entries)
+ {
+    struct tu_darwin_queue_submit *submit = (struct tu_darwin_queue_submit *)_submit;
++   /* Under the retire lock: a free on another thread reads the entries (darwin_submit_names). */
++   struct darwin_retire_state *retire = (struct darwin_retire_state *)device->darwin_retire;
++   pthread_mutex_lock(&retire->lock);
     NativeAdrenoAbiSubmitBuffer *cmds = (NativeAdrenoAbiSubmitBuffer *)
        util_dynarray_grow(&submit->commands, NativeAdrenoAbiSubmitBuffer, num_entries);
-    for (unsigned i = 0; i < num_entries; i++) {
+-   for (unsigned i = 0; i < num_entries; i++) {
++   for (unsigned i = 0; cmds && i < num_entries; i++) {
 +      /* pdx203: an entry whose BO was freed (its slot zeroed, or taken again by a BO being made): tu_cmd_buffer.cc's stats. */
 +      if (!entries[i].bo->darwin_handle || !p_atomic_read(&entries[i].bo->refcnt))
 +         p_atomic_inc(&tu_pdx203_cs_stats[7]);
        cmds[i] = (NativeAdrenoAbiSubmitBuffer) {
           .handle = entries[i].bo->darwin_handle,
           .iova = entries[i].bo->iova + entries[i].offset,
+          .bytes = entries[i].size,
+       };
+    }
++   pthread_mutex_unlock(&retire->lock);
+ }
+ 
+ static void
 diff --git a/src/freedreno/vulkan/tu_queue.cc b/src/freedreno/vulkan/tu_queue.cc
 index e06cd57..5ce798d 100644
 --- a/src/freedreno/vulkan/tu_queue.cc

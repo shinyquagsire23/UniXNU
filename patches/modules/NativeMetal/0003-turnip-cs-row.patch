@@ -1,22 +1,24 @@
 diff --git a/NativeBridgeMetalFrontend.mm b/NativeBridgeMetalFrontend.mm
-index 588d8a2..f200c9d 100644
+index 588d8a2..c616b2c 100644
 --- a/NativeBridgeMetalFrontend.mm
 +++ b/NativeBridgeMetalFrontend.mm
-@@ -4364,6 +4364,19 @@ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
+@@ -4364,6 +4364,21 @@ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
      row("MA%zub %s %s %s %s %s",i,frames[5],frames[6],frames[7],frames[8],frames[9]);
     }
    }
 +  // pdx203: command buffer resets and frees against their submissions (tu_darwin_cs_stats, patches/mesa/turnip-cs-reset-releases-idle-bos.patch):
 +  // resets (r), those of one still queued (q), and of one the GPU was still running (b); the same for frees (f); submission entries naming a
 +  // freed BO; resets of a primary holding a stream BO over 64 KiB, and those BOs released (idle ones); secondaries reset under a running primary, which waited (sw). usb-170's refused submission named a BO a reset had freed.
++  // BOs freed while a submission was being made (w, held for its fence) and those it named itself (i).
 +  {
 +   static void *turnipCs=gLoaderPath.empty()?nullptr:dlopen(gLoaderPath.c_str(),RTLD_NOW|RTLD_NOLOAD);
 +   static void (*csStats)(uint64_t *)=turnipCs?(void (*)(uint64_t *))dlsym(turnipCs,"tu_darwin_cs_stats"):nullptr;
 +   if(csStats) {
-+    uint64_t cs[10]={};csStats(cs);
-+    row("TCS r %llu q%llu b%llu | f %llu q%llu b%llu | dang %llu | big %llu rel %llu | sw %llu",
++    uint64_t cs[12]={};csStats(cs);
++    row("TCS r %llu q%llu b%llu | f %llu q%llu b%llu | dang %llu | big %llu rel %llu | sw %llu | w %llu i%llu",
 +     (unsigned long long)cs[0],(unsigned long long)cs[1],(unsigned long long)cs[2],(unsigned long long)cs[3],(unsigned long long)cs[4],
-+     (unsigned long long)cs[5],(unsigned long long)cs[7],(unsigned long long)cs[6],(unsigned long long)cs[8],(unsigned long long)cs[9]);
++     (unsigned long long)cs[5],(unsigned long long)cs[7],(unsigned long long)cs[6],(unsigned long long)cs[8],(unsigned long long)cs[9],
++     (unsigned long long)cs[10],(unsigned long long)cs[11]);
 +   }
 +  }
    char warning[200];size_t n=nmb_last_warning(warning,sizeof warning);
