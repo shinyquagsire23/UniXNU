@@ -1,5 +1,5 @@
 diff --git a/NativeAdrenoMetalPlugin.mm b/NativeAdrenoMetalPlugin.mm
-index 987c395..5c707bd 100644
+index 987c395..027c184 100644
 --- a/NativeAdrenoMetalPlugin.mm
 +++ b/NativeAdrenoMetalPlugin.mm
 @@ -54,6 +54,27 @@ static bool requestedPath(const char *name, char *path, size_t size) {
@@ -51,11 +51,30 @@ index 987c395..5c707bd 100644
      if (Gpu *gpu = makeGpu(port)) {
          // The row holds 63 characters: the common prefix goes, and a long reason keeps its start (what was refused) and its end (why).
          if (!detail) detail = "";
-@@ -358,9 +393,13 @@ static id deviceForPort(unsigned port) {
+@@ -358,9 +393,32 @@ static id deviceForPort(unsigned port) {
              // file every process gets one, as before. SpringBoard's device was lost right after its self-test (pdx203 usb-35..37,
              // "buffer refused: buffer: DeviceLost", no kernel method failing), and with it nothing past the boot logo was drawn.
              char list[1024];
 -            if (requestedPath("NativeAdrenoMetal.clients", list, sizeof list)) {
++            // pdx203 sa56: NativeAdrenoMetal.deny (make-gpu-addon --deny) names the processes that get no device; every other process gets
++            // one. The allow list below applies only without it.
++            char deny[1024];
++            if (requestedPath("NativeAdrenoMetal.deny", deny, sizeof deny)) {
++                bool denied = false;
++                if (FILE *file = fopen(deny, "r")) {
++                    char name[128];
++                    while (!denied && fgets(name, sizeof name, file)) {
++                        name[strcspn(name, "\r\n")] = 0;
++                        denied = name[0] && !strcmp(name, getprogname());
++                    }
++                    fclose(file);
++                }
++                if (denied) {step(port, "denied"); return device = nil;}
++                step(port, "client");
++                device = clientDevice(port);
++                step(port, device ? "device" : "no-device");
++                return device;
++            }
 +            const bool hasList = requestedPath("NativeAdrenoMetal.clients", list, sizeof list);
 +            step(port, hasList ? "list" : "no-list", hasList ? 0 : errno);
 +            if (hasList) {
@@ -67,7 +86,7 @@ index 987c395..5c707bd 100644
                      char name[128];
                      while (!named && fgets(name, sizeof name, file)) {
                          name[strcspn(name, "\r\n")] = 0;
-@@ -368,9 +407,12 @@ static id deviceForPort(unsigned port) {
+@@ -368,9 +426,12 @@ static id deviceForPort(unsigned port) {
                      }
                      fclose(file);
                  }
@@ -82,7 +101,7 @@ index 987c395..5c707bd 100644
          }
          // The discovery releases the accelerator port when it is done; the monitor and the scanout client keep using it.
          if (void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW | RTLD_LOCAL)) {
-@@ -661,11 +703,18 @@ static id deviceForPort(unsigned port) {
+@@ -661,11 +722,18 @@ static id deviceForPort(unsigned port) {
  }
  }  // namespace publish
  

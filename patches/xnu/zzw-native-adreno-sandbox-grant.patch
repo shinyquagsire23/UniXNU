@@ -2,7 +2,7 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
 index e7d6592..f940ab2 100644
 --- a/iokit/Kernel/IOUserClient.cpp
 +++ b/iokit/Kernel/IOUserClient.cpp
-@@ -4325,6 +4325,36 @@ is_io_service_set_authorization_id(
+@@ -4325,6 +4325,46 @@ is_io_service_set_authorization_id(
  }
  
  /* Routine io_service_open_ndr */
@@ -21,25 +21,35 @@ index e7d6592..f940ab2 100644
 +		return false;
 +	}
 +	proc_selfname(name, sizeof(name));
++	/* "*" grants every process; "!name" refuses one, whatever else the list says (pdx203 sa56: every process may run the Metal plugin). */
++	bool all = false, named = false;
 +	for (const char * at = list->getCStringNoCopy(); *at;) {
 +		size_t length = 0;
 +		while (at[length] && at[length] != ',') {
 +			++length;
 +		}
++		const bool refuse = length > 1 && at[0] == '!';
++		const char * entry = refuse ? at + 1 : at;
++		const size_t entry_length = refuse ? length - 1 : length;
 +		/* A process name holds 16 characters, so a longer entry is compared by its first 16. */
-+		if (length && 0 == strncmp(name, at, length < sizeof(name) - 1 ? length : sizeof(name) - 1)
-+		    && (length >= sizeof(name) - 1 || name[length] == 0)) {
-+			return true;
++		if (entry_length == 1 && entry[0] == '*' && !refuse) {
++			all = true;
++		} else if (entry_length && 0 == strncmp(name, entry, entry_length < sizeof(name) - 1 ? entry_length : sizeof(name) - 1)
++		    && (entry_length >= sizeof(name) - 1 || name[entry_length] == 0)) {
++			if (refuse) {
++				return false;
++			}
++			named = true;
 +		}
 +		at += length + (at[length] == ',' ? 1 : 0);
 +	}
-+	return false;
++	return all || named;
 +}
 +
  kern_return_t
  is_io_service_open_extended(
  	io_object_t _service,
-@@ -4353,7 +4383,7 @@ is_io_service_open_extended(
+@@ -4353,7 +4393,7 @@ is_io_service_open_extended(
  	}
  
  #if CONFIG_MACF
@@ -48,7 +58,7 @@ index e7d6592..f940ab2 100644
  		return kIOReturnNotPermitted;
  	}
  #endif
-@@ -4512,7 +4542,9 @@ is_io_service_open_extended(
+@@ -4512,7 +4552,9 @@ is_io_service_open_extended(
  				res = kIOReturnNotPrivileged;
  			}
  #if CONFIG_MACF
@@ -59,7 +69,7 @@ index e7d6592..f940ab2 100644
  				IOLog("IOUC %s failed MACF in process %s\n",
  				    client->getMetaClass()->getClassName(), creatorNameCStr);
  				res = kIOReturnNotPermitted;
-@@ -4520,6 +4552,7 @@ is_io_service_open_extended(
+@@ -4520,6 +4562,7 @@ is_io_service_open_extended(
  #endif
  
  			if ((kIOReturnSuccess == res)

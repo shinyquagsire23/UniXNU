@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Pack the owner-built Adreno Metal plugin into a GPU addon file for the boot payload.
 
-  make-gpu-addon.py [--publish] [--selftest] [--ca-prefs] [--reset-mobilegestalt] [--tu-debug OPTIONS] [--clients NAME,...] [--wallpaper DIR] [--cryptex-app DIR] [--cryptex-os DIR ROOT] [--audio DIR] [--wifi DIR] [--oslog DIR] [--user-endpoints ROOT NAME,...] [--prime-list FILE] OUTPUT
+  make-gpu-addon.py [--publish] [--selftest] [--ca-prefs] [--reset-mobilegestalt] [--tu-debug OPTIONS] [--clients NAME,... | --deny NAME,...] [--wallpaper DIR] [--cryptex-app DIR] [--cryptex-os DIR ROOT] [--audio DIR] [--wifi DIR] [--oslog DIR] [--user-endpoints ROOT NAME,...] [--prime-list FILE] [--apps DIR] OUTPUT
 
 The files are the ones add-gpu-plugin-data.py stages into a Data seed, with the same paths below /private/var/ngpu and the same modes:
 addons/NativeAdrenoMetal.bundle/*, addons/NativeAdrenoMetal.publish (--publish), addons/NativeAdrenoMetal.selftest (--selftest: the plugin's once-per-process
-on-device self-test, NativeAdrenoMetalPlugin.mm), addons/NativeAdrenoMetal.clients (--clients),
+on-device self-test, NativeAdrenoMetalPlugin.mm), addons/NativeAdrenoMetal.clients (--clients: only these processes get a GPU device) or addons/NativeAdrenoMetal.deny (--deny: every
+process but these gets one),
 prefs-mobile/ and prefs-root/ {com.apple.coreanimation,com.apple.backboardd,backboardd}.plist (--ca-prefs: the render server's Core Animation preferences
 add-gpu-plugin-data.py writes into a seed, no deep framebuffer and no compression; the kernel writes the two prefixes to
 /private/var/{mobile,root}/Library/Preferences),
@@ -54,6 +55,8 @@ def main():
     publish = '--publish' in sys.argv[1:]
     selftest = '--selftest' in sys.argv[1:]
     clients = None
+    deny = None
+    apps_dir = None
     wallpaper = None
     if '--wallpaper' in args:
         at = args.index('--wallpaper')
@@ -137,6 +140,20 @@ def main():
         del args[at:at + 2]
         if not tu_debug or not all(c.isalnum() or c in ',_-' for c in tu_debug):
             sys.exit('--tu-debug takes Turnip debug options separated by commas')
+    if '--apps' in args:
+        at = args.index('--apps')
+        if at + 1 >= len(args):
+            sys.exit('--apps takes a directory of .app bundles')
+        apps_dir = Path(args[at + 1]).resolve()
+        del args[at:at + 2]
+        if not apps_dir.is_dir():
+            sys.exit('--apps takes a directory of .app bundles')
+    if '--deny' in args:
+        at = args.index('--deny')
+        deny = [name for name in args[at + 1].split(',') if name] if at + 1 < len(args) else []
+        del args[at:at + 2]
+        if any(not all(c.isalnum() or c in '._-' for c in name) for name in deny):
+            sys.exit('--deny takes process names separated by commas')
     if '--clients' in args:
         at = args.index('--clients')
         clients = [name for name in args[at + 1].split(',') if name]
@@ -173,10 +190,27 @@ def main():
         for domain in ('com.apple.coreanimation', 'com.apple.backboardd', 'backboardd'):
             files.append(('prefs-mobile/%s.plist' % domain, 0o644, values))
             files.append(('prefs-root/%s.plist' % domain, 0o644, values))
+    if clients and deny is not None:
+        sys.exit('--clients and --deny exclude each other')
     if clients:
         files.append(('addons/NativeAdrenoMetal.clients', 0o644, ('\n'.join(clients) + '\n').encode()))
+    if deny is not None:
+        files.append(('addons/NativeAdrenoMetal.deny', 0o644, ('\n'.join(deny) + '\n').encode()))
     if prime_list:
         files.append(('addons/NativeAdrenoMetal.primelist', 0o644, prime_list.read_bytes()))
+    # --apps DIR stages the .app bundles under DIR (one directory per bundle) as apps/<Name>.app/* below /private/var/ngpu on the Data
+    # volume. These are staged files only: nothing mounts, registers or launches them (the kernel-side enablement is deferred).
+    if apps_dir is not None:
+        bundles = sorted(d for d in apps_dir.iterdir() if d.is_dir() and d.name.endswith('.app'))
+        if not bundles:
+            sys.exit('--apps takes a directory of .app bundles')
+        for bundle in bundles:
+            for path in sorted(p for p in bundle.rglob('*') if p.is_file() and not p.is_symlink()):
+                name = 'apps/' + path.relative_to(apps_dir).as_posix()
+                if len(name.encode()) + 1 > 160:
+                    print('left out (path too long): ' + name, file=sys.stderr)
+                    continue
+                files.append((name, 0o755 if path.stat().st_mode & 0o111 else 0o644, path.read_bytes()))
     files.append(('bin/adrenoprobed', 0o755, (PLUGIN / 'adrenoprobed').read_bytes()))
     for plist in sorted(PLUGIN.glob('*.plist')):
         if not plist.name.endswith('-entitlements.plist'):   # build input, not a launchd job

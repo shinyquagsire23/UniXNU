@@ -1,27 +1,49 @@
 diff --git a/NativeAdrenoPublish.cpp b/NativeAdrenoPublish.cpp
-index 968ed28..70dbd9f 100644
+index 968ed28..0c835ce 100644
 --- a/NativeAdrenoPublish.cpp
 +++ b/NativeAdrenoPublish.cpp
-@@ -116,10 +116,17 @@ char native_adreno_plugin_steps[8][48];
+@@ -116,10 +116,23 @@ char native_adreno_plugin_steps[8][48];
   * wallpaper, iconservicesagent for the icons, WidgetRenderer_Default for the widgets: int-196's screen pictures showed a black wallpaper and white widget
   * boxes, none of which had a native device), 170 MiB each (page aligned). int-198: iconservicesagent reached 128 MiB into its window and then lost its
   * Metal device; whether the window is the cause is what the [gpu windows] log row decides before these sizes change. */
+-enum : unsigned {NativeAdrenoMaxClients=4};
 +/* pdx203 usb-182: the render server's 1 GiB filled (runtime ~550 MiB, imports ~160 MiB, streams ~40 MiB; 292 placements failed) and
 + * full-screen textures were refused. Slot 0 now starts at 64 MiB, above the GMEM window at 0 and the kernel buffers at 32 MiB, and
 + * reaches the other slots: 1216 MiB (sa39 peaked at 913 MiB through ten launch cycles). sa51: the other three 256 MiB each (170 before): the
 + * Turnip heap of a client is its window, and the WebKit GPU process's Metal device failed to open in 170 MiB (OutOfMemory(Device), sa50).
 + * sa54: the aperture is 4 GiB and the other three 896 MiB each: the WebKit GPU process filled 256 MiB with surface imports (sa53). */
- enum : unsigned {NativeAdrenoMaxClients=4};
++/* sa56: every process may run the Metal plugin (a deny list replaces the allow list of four), so eleven windows: the render server's 1216 MiB,
++ * three large ones of 640 MiB (slots 1-3; WebKit's GPU process takes these first: it needed more than 256 MiB) and seven small ones of 128 MiB
++ * (slots 4-10; every other process takes these first, then a large one). A process that finds none free gets no device and draws on the CPU. */
++enum : unsigned {NativeAdrenoMaxClients=11,NativeAdrenoFirstSmallSlot=4};
  static const struct {uint64_t start,bytes;} kClientWindows[NativeAdrenoMaxClients]={
 -    {0x20000000ull,0x40000000ull},{0x60000000ull,0x0AAA9000ull},{0x6AAA9000ull,0x0AAA9000ull},{0x75552000ull,0x0AAA9000ull}};
-+    {0x04000000ull,0x4C000000ull},{0x50000000ull,0x38000000ull},{0x88000000ull,0x38000000ull},{0xC0000000ull,0x38000000ull}};
++    {0x04000000ull,0x4C000000ull},
++    {0x50000000ull,0x28000000ull},{0x78000000ull,0x28000000ull},{0xA0000000ull,0x28000000ull},
++    {0xC8000000ull,0x08000000ull},{0xD0000000ull,0x08000000ull},{0xD8000000ull,0x08000000ull},{0xE0000000ull,0x08000000ull},
++    {0xE8000000ull,0x08000000ull},{0xF0000000ull,0x08000000ull},{0xF8000000ull,0x08000000ull}};
  
 +/* pdx203 0005: native_adreno_note_property_read's log of other processes' reads. */
 +extern "C" {char native_adreno_property_log[16][48];uint32_t native_adreno_property_log_repeat[16];volatile uint32_t native_adreno_property_log_count;}
  namespace {
  void shiftName(char names[3][17]) {
      memcpy(names[2], names[1], 17);
-@@ -745,6 +752,23 @@ extern "C" void native_adreno_note_property_read(const char *key)
+@@ -239,7 +252,13 @@ bool AGXDeviceUserClient::mount(bool kernel)
+     if(kernel)slot=g.kernel_client?NativeAdrenoMaxClients:0;
+     else {
+         if(!strncmp(name_,"backboardd",sizeof name_) && !g.slots[0])slot=0;
+-        for(unsigned i=1;slot==NativeAdrenoMaxClients && i<NativeAdrenoMaxClients;++i)if(!g.slots[i])slot=i;
++        /* WebKit's processes a large window first, everyone else a small one first (sa56). */
++        const bool large=!strncmp(name_,"com.apple.WebKit",16);
++        for(unsigned pass=0;pass<2 && slot==NativeAdrenoMaxClients;++pass) {
++            const bool largeNow=(pass==0)==large;
++            const unsigned first=largeNow?1:NativeAdrenoFirstSmallSlot,last=largeNow?NativeAdrenoFirstSmallSlot:NativeAdrenoMaxClients;
++            for(unsigned i=first;slot==NativeAdrenoMaxClients && i<last;++i)if(!g.slots[i])slot=i;
++        }
+     }
+     const IOReturn opened=slot<NativeAdrenoMaxClients?core->open(NativeAdrenoAbiVersion,g.vm,g.submit,g.ring,g.input_bits,g.output_bits):kIOReturnNoSpace;
+     if(opened!=kIOReturnSuccess) {native_adreno_mount_fail[0]=slot<NativeAdrenoMaxClients?2:1;native_adreno_mount_fail[1]=uint32_t(opened);native_adreno_mount_fail[2]=slot;native_adreno_mount_fail[3]=native_adreno_mount_fail[3]+1;}
+@@ -745,6 +764,23 @@ extern "C" void native_adreno_note_property_read(const char *key)
      }
      shiftName(native_adreno_metal_diag.reader);
      native_adreno_metal_diag.property_reads=native_adreno_metal_diag.property_reads+1;
