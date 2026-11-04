@@ -184,6 +184,27 @@ outputs = []
 legacy_name = "NativeNovatekTouch"
 
 [[component]]
+id = "QcomXnuUsbDebug"
+kind = "driver"
+function = "CDC-ACM kernel log and control channel over the Qualcomm DWC3"
+scope = "controller"
+repository = "https://github.com/FFT-infra/QcomXnuUsbDebug.git"
+revision = "ab6e3635c4b915c248e04fc042ffaea28026b207"
+path = "drivers/QcomXnuUsbDebug"
+hardware = ["Qualcomm DWC3 USB controller (SM8250 profile)"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["firmware leaves the controller clocked in device mode", "XNU console hooks (device patch series)"]
+verified_devices = ["pdx203"]
+dependencies = []
+source_files = ["kernel/QcomXnuUsbDebug.c"]
+runtime_identifiers = ["QcomXnuUsbDebug"]
+# The board builds and links the archive (CONFIG_XNU_EXTRA_LD_ARCHIVES); build-xnu-4k-baseline.sh gives the hooked units
+# XNU_QCOM_USB_DEBUG and the module's include path.
+build_stage = "embedded"
+build = []
+outputs = []
+
+[[component]]
 id = "QcomGeniSpi"
 repository_id = 1426849026
 kind = "driver"
