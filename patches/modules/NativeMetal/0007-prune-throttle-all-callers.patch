@@ -1,0 +1,30 @@
+NativeMetal 0007: throttle the held-import idle walk inside pruneHeldImports, for every caller
+
+Every command buffer's finish walks it too (sa71: about 1 % of backboardd's samples after 0006's throttle of the import path).
+
+--- a/NativeBridgeMetalFrontend.mm
++++ b/NativeBridgeMetalFrontend.mm
+@@ -850,6 +850,11 @@
+ // ones over kHeldMax, or every one when `all`.
+ static void pruneHeldImports(bool all,std::vector<NBBuffer *> &gone) {
+  const uint64_t now=heldNow();
++ // NativeMetal 0007: the idle walk at most every 100 ms, from whichever caller (every command buffer's finish calls it too: sa71,
++ // still about 1 % of backboardd's samples after 0006 throttled the new-import call alone).
++ static uint64_t walkedAt;
++ if(!all && gHeldImports.size()<=kHeldMax && now-walkedAt<100000000ull)return;
++ walkedAt=now;
+  for(auto it=gHeldImports.begin();it!=gHeldImports.end();) {
+   if(all || now-it->second.lastUse>kHeldIdleNs){gone.push_back(it->second.buffer);it=gHeldImports.erase(it);gSurfaceImportsPrunedIdle++;}
+   else ++it;
+@@ -898,10 +903,8 @@
+  if(!handle){CFRelease(surface);NBLOG(@"native-metal: surface import refused: %@",lastError());return nil;}
+  gSurfaceImportsMade++;NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=MTLResourceStorageModeShared;buffer.importedSurface=surface;
+  if(identity) {
+-  // The idle walk at most every 100 ms (sa68: about 1.5 % of backboardd's samples were this walk on every new import).
+-  static uint64_t prunedAt;
+   const uint64_t now=heldNow();
+-  if(now-prunedAt>100000000ull || gHeldImports.size()>=kHeldMax){prunedAt=now;pruneHeldImports(false,gone);}
++  pruneHeldImports(false,gone);
+   uint64_t pages=0;
+   if(pagesIdentity((uint64_t)base,bytes,&pages))gHeldImports[{identity,(uint64_t)bytes}]={buffer,surface,now,(uint64_t)base,pages};
+  }
