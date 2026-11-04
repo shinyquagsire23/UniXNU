@@ -1,0 +1,119 @@
+diff --git a/NativeBridgeMetalFrontend.mm b/NativeBridgeMetalFrontend.mm
+--- a/NativeBridgeMetalFrontend.mm
++++ b/NativeBridgeMetalFrontend.mm
+@@ -809,31 +809,37 @@
+ - (IOSurfaceRef)iosurface {return nullptr;}   // a buffer is never the backing of a surface here (surfaces back textures)
+ NB_RESOURCE_SPI
+ @end
+-// Reuse only an import still held by a texture/view or pending command. Weak
+-// values never extend a GPU allocation's lifetime. The strong buffer snapshot
+-// and its retained surface prevent object/address reuse during a hit. A new
+-// mapping, allocation identity or size needs a separate import; ordinary
+-// caller-owned no-copy buffers do not enter this cache.
+-static NSMapTable<NSValue *,NBBuffer *> *gSurfaceImports;
+-static std::mutex gSurfaceImportLock;
+-// Core Animation makes a texture of each window surface at every frame and drops it when the frame completes, so the weak table
+-// lost the import between frames and each frame imported every surface again (allocate, map, free). As Metal keeps a surface's GPU
+-// mapping for as long as the surface lives, an import stays held while anything else in this process still retains its surface (the
+-// import's own retain is the only one left once the surface is gone), and everything held goes back when the system reports memory
+-// pressure. No count or age limit: held imports whose surface is gone are let go at the next import, at every command buffer's
+-// completion and on memory pressure (native_bridge_metal_trim_surface_imports).
+ #include <map>
+ #include <tuple>
+-struct HeldImport {NBBuffer *buffer;IOSurfaceRef surface;};
++// 2026-11-03 (TestUFO at 50 fps, usb-204): the render server still imported about one surface a frame (N row: 3332 made, 3322
++// released): each frame allocated, pinned, mapped and later freed a WebKit backing store again (mach_vm_region_recurse, BO map, IOVA
++// free and unmap: about a quarter of backboardd's CPU samples). Either Core Animation gets a fresh IOSurfaceRef (its own mapping and
++// base address) for a client's surface at its commits (the N row's other-object count tells), so the old key (surface, address, size)
++// missed, or it dropped the surface between frames and the held import, whose own surface object nothing else retained, was pruned at
++// the next import. Now the key is the surface's global ID and size; the import's own retained surface object keeps that ID from being
++// reused, and its mapping stays valid for the CPU side. Any caller's object for the same surface gets the held import (textures address
++// it by their offset from the surface's base, the same in every mapping). An import goes when no texture has used it for kHeldIdleNs,
++// when the table is over kHeldMax (least recently used first), or on memory pressure.
++struct HeldImport {NBBuffer *buffer;IOSurfaceRef surface;uint64_t lastUse;};
+ // Under gSurfaceImportLock. Never destroyed: a completion thread may still trim it while the process exits.
+-static auto &gHeldImports=*new std::map<std::tuple<uint64_t,uint64_t,uint64_t>,HeldImport>;
+-static NSUInteger gSurfaceImportsPruned=64;     // the table size at which dead associations are next pruned
+-// Drops (into `gone`, released by the caller outside the lock) every held import whose surface only the import still retains, or every
+-// one when `all`.
++static auto &gHeldImports=*new std::map<std::pair<uint64_t,uint64_t>,HeldImport>;
++static std::mutex gSurfaceImportLock;
++static constexpr uint64_t kHeldIdleNs=1500000000ull;   // 1.5 s: WebKit's back buffers come round every 2-3 frames
++static constexpr size_t kHeldMax=96;
++static std::atomic<uint64_t> gSurfaceImportHits,gSurfaceImportOtherObject,gSurfaceImportsPrunedIdle;
++static uint64_t heldNow() {return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);}
++// Drops (into `gone`, released by the caller outside the lock) every held import idle for kHeldIdleNs, then the least recently used
++// ones over kHeldMax, or every one when `all`.
+ static void pruneHeldImports(bool all,std::vector<NBBuffer *> &gone) {
++ const uint64_t now=heldNow();
+  for(auto it=gHeldImports.begin();it!=gHeldImports.end();) {
+-  if(all || CFGetRetainCount(it->second.surface)<=1){gone.push_back(it->second.buffer);it=gHeldImports.erase(it);}
++  if(all || now-it->second.lastUse>kHeldIdleNs){gone.push_back(it->second.buffer);it=gHeldImports.erase(it);gSurfaceImportsPrunedIdle++;}
+   else ++it;
++ }
++ while(gHeldImports.size()>kHeldMax) {
++  auto oldest=gHeldImports.begin();
++  for(auto it=gHeldImports.begin();it!=gHeldImports.end();++it)if(it->second.lastUse<oldest->second.lastUse)oldest=it;
++  gone.push_back(oldest->second.buffer);gHeldImports.erase(oldest);gSurfaceImportsPrunedIdle++;
+  }
+ }
+ static void trimHeldImports(bool all) {
+@@ -852,36 +858,26 @@
+   dispatch_activate(source);
+  });
+ }
+-// The entry records the surface object the import itself retains, never the caller's: a hit may come with another object for the same
+-// surface, which nothing here retains, and a later prune read its retain count after the caller freed it (backboardd died on the isa
+-// authentication inside CFGetRetainCount, called from pruneHeldImports at a command buffer's completion).
+-static void holdImport(uint64_t identity,uint64_t address,uint64_t bytes,NBBuffer *buffer,std::vector<NBBuffer *> &gone) {
+- pruneHeldImports(false,gone);
+- gHeldImports[{identity,address,bytes}]={buffer,buffer.importedSurface};
+-}
+ static NBBuffer *surfaceBuffer(IOSurfaceRef surface,void *base,size_t bytes) {
+- struct Key {uint64_t identity,address,bytes;};
+- const Key value={IOSurfaceGetID(surface),(uintptr_t)base,bytes};
+- NSValue *key=value.identity?[NSValue valueWithBytes:&value objCType:@encode(Key)]:nil;
++ const uint64_t identity=IOSurfaceGetID(surface);
+  watchImportPressure();
+  std::vector<NBBuffer *> gone;   // declared before the lock: released after it
+  std::lock_guard<std::mutex> lock(gSurfaceImportLock);
+- if(!gSurfaceImports)gSurfaceImports=[NSMapTable strongToWeakObjectsMapTable];
+- NBBuffer *buffer=key?[gSurfaceImports objectForKey:key]:nil;
+- if(buffer){if(key)holdImport(value.identity,value.address,value.bytes,buffer,gone);return buffer;}
++ if(identity) {
++  auto it=gHeldImports.find({identity,(uint64_t)bytes});
++  if(it!=gHeldImports.end()) {
++   it->second.lastUse=heldNow();gSurfaceImportHits++;
++   if(it->second.surface!=surface)gSurfaceImportOtherObject++;
++   return it->second.buffer;
++  }
++ }
+  // The surface keeps its CPU mapping (the imported pages) until the import is freed.
+  NmbBuffer *handle=nmb_buffer_new_no_copy_releasing(gDevice,base,bytes,MTLResourceStorageModeShared,releaseSurface,(void *)CFRetain(surface));
+  if(!handle){CFRelease(surface);NBLOG(@"native-metal: surface import refused: %@",lastError());return nil;}
+- gSurfaceImportsMade++;buffer=[NBBuffer new];buffer.handle=handle;buffer.options=MTLResourceStorageModeShared;buffer.importedSurface=surface;
+- if(key) {
+-  // Associations whose import is gone are pruned whenever the table has doubled since the last pruning; a live one is never evicted.
+-  if(gSurfaceImports.count>=gSurfaceImportsPruned) {
+-   for(NSValue *old in gSurfaceImports.keyEnumerator.allObjects)
+-    if(![gSurfaceImports objectForKey:old])[gSurfaceImports removeObjectForKey:old];
+-   gSurfaceImportsPruned=MAX(gSurfaceImports.count*2,(NSUInteger)64);
+-  }
+-  [gSurfaceImports setObject:buffer forKey:key];
+-  holdImport(value.identity,value.address,value.bytes,buffer,gone);
++ gSurfaceImportsMade++;NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=MTLResourceStorageModeShared;buffer.importedSurface=surface;
++ if(identity) {
++  pruneHeldImports(false,gone);
++  gHeldImports[{identity,(uint64_t)bytes}]={buffer,surface,heldNow()};
+  }
+  return buffer;
+ }
+@@ -4251,6 +4247,8 @@
+  row("N no-copy %llu dealloc %llu/%llu surface %llu/%llu",(unsigned long long)gNoCopyAll.load(),(unsigned long long)gNoCopyReleased.load(),
+   (unsigned long long)gNoCopyMade.load(),
+   (unsigned long long)gSurfaceImportsReleased.load(),(unsigned long long)gSurfaceImportsMade.load());
++ row("N held imports %llu hits %llu other-object %llu pruned %llu",(unsigned long long)[]{std::lock_guard<std::mutex> l(gSurfaceImportLock);return (uint64_t)gHeldImports.size();}(),
++  (unsigned long long)gSurfaceImportHits.load(),(unsigned long long)gSurfaceImportOtherObject.load(),(unsigned long long)gSurfaceImportsPrunedIdle.load());
+  {uint64_t remaps[2]={};if(nmb_no_copy_remaps(remaps))row("N no-copy ranges checked %llu remapped %llu",(unsigned long long)remaps[0],(unsigned long long)remaps[1]);}
+  // The runtime's VkPipeline makings (the creation log, METAL2VULKAN_LOG_PIPELINES; they happen at draws, not at the state's creation) and
+  // its shader cache: where the driver's compile time goes.
