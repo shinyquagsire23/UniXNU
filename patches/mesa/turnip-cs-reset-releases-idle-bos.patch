@@ -1,8 +1,16 @@
 diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
-index 5732b96..28da3de 100644
+index 5732b96..58e1ee4 100644
 --- a/src/freedreno/vulkan/tu_cmd_buffer.cc
 +++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
-@@ -4195,12 +4195,47 @@ tu_create_cmd_buffer(struct vk_command_pool *pool,
+@@ -4179,6 +4179,7 @@ tu_create_cmd_buffer(struct vk_command_pool *pool,
+       }
+    }
+ 
++   util_dynarray_init(&cmd_buffer->pdx203_secondaries, NULL);
+    tu_cs_init(&cmd_buffer->cs, device, TU_CS_MODE_GROW, 4096, "cmd cs");
+    tu_cs_init(&cmd_buffer->draw_cs, device, TU_CS_MODE_GROW, 4096, "draw cs");
+    tu_cs_init(&cmd_buffer->tile_store_cs, device, TU_CS_MODE_GROW, 2048, "tile store cs");
+@@ -4195,12 +4196,58 @@ tu_create_cmd_buffer(struct vk_command_pool *pool,
     return VK_SUCCESS;
  }
  
@@ -10,9 +18,12 @@ index 5732b96..28da3de 100644
 + * (tu_darwin_cs_stats): resets, resets of one a queue submission still held (vk_command_buffer::pdx203_queued, the runtime's deferred
 + * submits included), resets of one whose last submission the GPU had not finished, then frees and the same two for them, resets that
 + * found the primary's stream holding over 64 KiB, submission entries that named a freed BO (tu_knl_darwin.cc), then the streams' BOs
-+ * the idle resets released (tu_cs.cc); slot 9 is spare. Either kind of early reset rewrites (or frees) a
++ * the idle resets released (tu_cs.cc), and resets of a secondary whose last primary submission was still running, which waited. Either kind of early reset rewrites (or frees) a
 + * stream the GPU is still to run. */
 +uint64_t tu_pdx203_cs_stats[10];
++#ifndef PDX203_RELEASE_IDLE_BOS
++#define PDX203_RELEASE_IDLE_BOS 0   /* A/B (usb-175/177 GPU faults): counted, not released */
++#endif
 +
 +extern "C" __attribute__((visibility("default"))) void tu_darwin_cs_stats(uint64_t out[10]);
 +extern "C" __attribute__((visibility("default"))) void
@@ -34,6 +45,13 @@ index 5732b96..28da3de 100644
 +   if (cmd_buffer->pdx203_fence && cmd_buffer->pdx203_queue &&
 +       tu_queue_wait_fence(cmd_buffer->pdx203_queue, cmd_buffer->pdx203_fence, 0) == VK_TIMEOUT) {
 +      p_atomic_inc(&tu_pdx203_cs_stats[slot + 2]);
++      /* A secondary is never submitted itself: its fence is that of the last primary submission that executed it, whose streams call
++       * into the secondary's BOs. Resetting it now frees or rewrites them under the GPU (usb-175: the CP's IB2 fetch faulted on a freed
++       * BO in the render server's window, and the GPU hung for good). Wait for that submission, a second at most, and count it. */
++      if (cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY) {
++         p_atomic_inc(&tu_pdx203_cs_stats[9]);
++         tu_queue_wait_fence(cmd_buffer->pdx203_queue, cmd_buffer->pdx203_fence, 1000000000ull);
++      }
 +      return false;
 +   }
 +   return true;
@@ -46,36 +64,49 @@ index 5732b96..28da3de 100644
        container_of(vk_cmd_buffer, struct tu_cmd_buffer, vk);
  
 +   tu_cmd_buffer_note_idle(cmd_buffer, 3);
++   util_dynarray_fini(&cmd_buffer->pdx203_secondaries);
 +
     tu_cs_finish(&cmd_buffer->cs);
     tu_cs_finish(&cmd_buffer->draw_cs);
     tu_cs_finish(&cmd_buffer->tile_store_cs);
-@@ -4288,6 +4323,14 @@ tu_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
+@@ -4288,6 +4335,15 @@ tu_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
         cmd_buffer->vk.record_result = status_check_result;
      }
  
 +   /* pdx203: an idle primary's own stream lets its large kept BO go (tu_cs.cc); nothing but its own entries points into it. */
 +   const bool idle = tu_cmd_buffer_note_idle(cmd_buffer, 0);
++   util_dynarray_clear(&cmd_buffer->pdx203_secondaries);
 +   if (cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY && cmd_buffer->cs.read_only.bo_count &&
 +       cmd_buffer->cs.read_only.bos[cmd_buffer->cs.read_only.bo_count - 1]->size > 64 * 1024) {
 +      p_atomic_inc(&tu_pdx203_cs_stats[6]);
-+      cmd_buffer->cs.release_large_on_reset = idle;
++      cmd_buffer->cs.release_large_on_reset = idle && PDX203_RELEASE_IDLE_BOS;
 +   }
 +
     tu_cs_reset(&cmd_buffer->cs);
     tu_cs_reset(&cmd_buffer->draw_cs);
     tu_cs_reset(&cmd_buffer->tile_store_cs);
+@@ -6350,6 +6406,7 @@ tu_CmdExecuteCommands(VkCommandBuffer commandBuffer,
+ 
+    for (uint32_t i = 0; i < commandBufferCount; i++) {
+       VK_FROM_HANDLE(tu_cmd_buffer, secondary, pCmdBuffers[i]);
++      util_dynarray_append(&cmd->pdx203_secondaries, secondary);
+ 
+       if (secondary->usage_flags &
+           VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT) {
 diff --git a/src/freedreno/vulkan/tu_cmd_buffer.h b/src/freedreno/vulkan/tu_cmd_buffer.h
-index 17bebeb..9bb4093 100644
+index 17bebeb..fadfa50 100644
 --- a/src/freedreno/vulkan/tu_cmd_buffer.h
 +++ b/src/freedreno/vulkan/tu_cmd_buffer.h
-@@ -661,6 +661,10 @@ struct tu_cmd_buffer
+@@ -661,6 +661,13 @@ struct tu_cmd_buffer
  
     struct tu_device *device;
  
 +   /* pdx203: the queue and kernel fence of its last submission (tu_queue.cc), for tu_cmd_buffer_note_idle (tu_cmd_buffer.cc). */
 +   struct tu_queue *pdx203_queue;
 +   uint32_t pdx203_fence;
++   /* pdx203: the secondaries this primary executed since its reset (tu_CmdExecuteCommands): a submission of the primary stamps each with
++    * its queue and fence too (tu_queue.cc), as the primary's streams call into theirs without owning them. */
++   struct util_dynarray pdx203_secondaries;
 +
     struct u_trace_iterator trace_renderpass_start;
     struct u_trace trace, rp_trace;
@@ -165,10 +196,10 @@ index 3eb29ed..d087ef7 100644
           .handle = entries[i].bo->darwin_handle,
           .iova = entries[i].bo->iova + entries[i].offset,
 diff --git a/src/freedreno/vulkan/tu_queue.cc b/src/freedreno/vulkan/tu_queue.cc
-index e06cd57..f3ce4a5 100644
+index e06cd57..5ce798d 100644
 --- a/src/freedreno/vulkan/tu_queue.cc
 +++ b/src/freedreno/vulkan/tu_queue.cc
-@@ -563,6 +563,12 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
+@@ -563,6 +563,16 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
        goto out;
     }
  
@@ -176,6 +207,10 @@ index e06cd57..f3ce4a5 100644
 +      struct tu_cmd_buffer *cmd_buffer = (struct tu_cmd_buffer *) vk_submit->command_buffers[i];
 +      cmd_buffer->pdx203_queue = queue;
 +      cmd_buffer->pdx203_fence = queue->fence;
++      util_dynarray_foreach (&cmd_buffer->pdx203_secondaries, struct tu_cmd_buffer *, secondary) {
++         (*secondary)->pdx203_queue = queue;
++         (*secondary)->pdx203_fence = queue->fence;
++      }
 +   }
 +
     tu_debug_bos_print_stats(device);

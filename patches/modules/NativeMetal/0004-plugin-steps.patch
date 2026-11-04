@@ -1,0 +1,67 @@
+diff --git a/NativeAdrenoMetalPlugin.mm b/NativeAdrenoMetalPlugin.mm
+index 987c395..e518fcb 100644
+--- a/NativeAdrenoMetalPlugin.mm
++++ b/NativeAdrenoMetalPlugin.mm
+@@ -54,6 +54,20 @@ static bool requestedPath(const char *name, char *path, size_t size) {
+     snprintf(slash + 1, size - size_t(slash + 1 - path), "%s", name);
+     return access(path, R_OK) == 0;
+ }
++// pdx203: a step of this process's plugin, for the kernel's PLUGSTEP row (NativeAdrenoPublish.cpp native_adreno_plugin_steps): the
++// accelerator records the key of a registry property read "NAM:<step>", which needs no connection, so a process that never opens a device
++// (WebKit.GPU, usb-174) still says how far it got.
++static void step(unsigned port, const char *what, int error = 0) {
++    static void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW | RTLD_LOCAL);
++    static auto create = iokit ? (CFTypeRef (*)(unsigned, CFStringRef, CFAllocatorRef, uint32_t))dlsym(iokit, "IORegistryEntryCreateCFProperty") : nullptr;
++    if (!create || !port) return;
++    char key[40];
++    snprintf(key, sizeof key, "NAM:%.24s %d", what, error);
++    CFStringRef name = CFStringCreateWithCString(kCFAllocatorDefault, key, kCFStringEncodingUTF8);
++    if (!name) return;
++    if (CFTypeRef value = create(port, name, kCFAllocatorDefault, 0)) CFRelease(value);
++    CFRelease(name);
++}
+ static bool requested() {
+     char path[1024];
+     return requestedPath("NativeAdrenoMetal.publish", path, sizeof path);
+@@ -358,9 +372,13 @@ static id deviceForPort(unsigned port) {
+             // file every process gets one, as before. SpringBoard's device was lost right after its self-test (pdx203 usb-35..37,
+             // "buffer refused: buffer: DeviceLost", no kernel method failing), and with it nothing past the boot logo was drawn.
+             char list[1024];
+-            if (requestedPath("NativeAdrenoMetal.clients", list, sizeof list)) {
++            const bool hasList = requestedPath("NativeAdrenoMetal.clients", list, sizeof list);
++            step(port, hasList ? "list" : "no-list", hasList ? 0 : errno);
++            if (hasList) {
+                 bool named = false;
+-                if (FILE *file = fopen(list, "r")) {
++                FILE *file = fopen(list, "r");
++                if (!file) step(port, "list-open", errno);
++                if (file) {
+                     char name[128];
+                     while (!named && fgets(name, sizeof name, file)) {
+                         name[strcspn(name, "\r\n")] = 0;
+@@ -368,9 +386,12 @@ static id deviceForPort(unsigned port) {
+                     }
+                     fclose(file);
+                 }
+-                if (!named) return device = nil;
++                if (!named) {step(port, "not-named"); return device = nil;}
+             }
+-            return device = clientDevice(port);
++            step(port, "client");
++            device = clientDevice(port);
++            step(port, device ? "device" : "no-device");
++            return device;
+         }
+         // The discovery releases the accelerator port when it is done; the monitor and the scanout client keep using it.
+         if (void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW | RTLD_LOCAL)) {
+@@ -665,7 +686,9 @@ static id deviceForPort(unsigned port) {
+ - (id)initWithAcceleratorPort:(unsigned)port {
+     self = [super init];
+     if (!self || !port) return nil;
+-    if (publish::requested()) return publish::deviceForPort(port);
++    const bool asked = publish::requested();
++    publish::step(port, asked ? "init" : "init-unrequested", asked ? 0 : errno);
++    if (asked) return publish::deviceForPort(port);
+     static bool attempted;
+     if (attempted) return nil;
+     attempted = true;
