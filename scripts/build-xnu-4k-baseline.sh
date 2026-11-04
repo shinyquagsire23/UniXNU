@@ -39,7 +39,7 @@ fi
 # they come off first or boot-progress cannot be reversed. The launch-policy hook sits right after the CONFIG_MEMORYSTATUS
 # block of load_init_program, inside the context of offline-owner-z-air-init, which then reads as neither applied nor
 # applicable on a rebuild; it comes off before all of them.
-for LATE_PATCH in "$ROOT/patches/xnu/zzy-zpreboot-cryptex-mount.patch" "$ROOT/patches/xnu/zzy-zpath-diag.patch" "$ROOT/patches/xnu/zzy-zoslog-addon-mount.patch" "$ROOT/patches/xnu/zzy-zaudio-addon-mount.patch" "$ROOT/patches/xnu/zzzzzzzzza-launch-policy.patch" "$ROOT/patches/xnu/zzzzzzzz-qcom-usb-debug-worker.patch" "$ROOT/patches/xnu/zzzzzzzz-qcom-usb-debug-console.patch" \
+for LATE_PATCH in "$ROOT/patches/xnu/zzzzzzzzzi-apps-addon-mount.patch" "$ROOT/patches/xnu/zzzzzzzzzh-unixnu-jailbreak.patch" "$ROOT/patches/xnu/zzy-zpreboot-cryptex-mount.patch" "$ROOT/patches/xnu/zzy-zpath-diag.patch" "$ROOT/patches/xnu/zzy-zoslog-addon-mount.patch" "$ROOT/patches/xnu/zzy-zaudio-addon-mount.patch" "$ROOT/patches/xnu/zzzzzzzzza-launch-policy.patch" "$ROOT/patches/xnu/zzzzzzzz-qcom-usb-debug-worker.patch" "$ROOT/patches/xnu/zzzzzzzz-qcom-usb-debug-console.patch" \
     "$ROOT/patches/xnu/zzz-boot-progress.patch" "$ROOT/patches/xnu/zzy-staged-system-apps.patch" \
     "$ROOT/patches/xnu/zzy-native-gpu-addon-mount.patch"; do
   if git -C .cache/xnu-work apply --reverse --check "$LATE_PATCH" >/dev/null 2>&1; then

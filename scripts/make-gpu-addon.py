@@ -199,7 +199,8 @@ def main():
     if prime_list:
         files.append(('addons/NativeAdrenoMetal.primelist', 0o644, prime_list.read_bytes()))
     # --apps DIR stages the .app bundles under DIR (one directory per bundle) as apps/<Name>.app/* below /private/var/ngpu on the Data
-    # volume. These are staged files only: nothing mounts, registers or launches them (the kernel-side enablement is deferred).
+    # volume. patches/xnu/zzzzzzzzzi-apps-addon-mount.patch unions apps/ over /Applications at boot, so LaunchServices and SpringBoard
+    # list the bundles next to the sealed system apps; the code signing they carry only has to pass the kernel's jailbreak switch.
     if apps_dir is not None:
         bundles = sorted(d for d in apps_dir.iterdir() if d.is_dir() and d.name.endswith('.app'))
         if not bundles:

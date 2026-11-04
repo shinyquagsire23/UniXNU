@@ -1,0 +1,33 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7240,6 +7240,12 @@
+  * root daemons (the log forwarder running SystemAppMigrator, pdx203 usb-135) failed every installcoordinationd lookup with error 3. */
+ volatile int native_gpu_addon9_stage = 0;
+ volatile int native_gpu_addon9_status = -1;
++/* mount10: the app bundles the payload's addon stages under apps/ (make-gpu-addon.py --apps), unioned over /Applications so that
++ * LaunchServices and SpringBoard find them next to the sealed system apps. The bundles are unsigned or signed with a fake certificate;
++ * the kernel admits them only with the jailbreak switch of patches/xnu/zzzzzzzzzh-unixnu-jailbreak.patch (amfi=0x80's get-out-of-my-way
++ * bit), which also leaves their launchd jobs and their container writes alone. */
++volatile int native_gpu_addon10_stage = 0;
++volatile int native_gpu_addon10_status = -1;
+ /* Executables reached through the App cryptex overlay (the bindfs mount on /System/Cryptexes, mount4 below): their code is checked
+  * against the boot trust cache like any other, but AMFI's launch constraints (on-authorized-authapfs-volume and the category it gives
+  * these Apple programs, c[8] even with an owner trust entry of category 0) can never match a file on owner Data, so every Safari service
+@@ -7639,9 +7645,15 @@
+ 	native_gpu_addon_mount(p, scratch, 0xec0, xpc_source, sizeof(xpc_source), xpc_point, sizeof(xpc_point),
+ 	    "/System/Library/xpc/launchd.plist", "/System/Library/xpc/foreground_user_endpoints.plist", &native_gpu_addon9_stage,
+ 	    &native_gpu_addon9_status);
+-	printf("GPUADDON mount6 (usr/bin) %d/%d mount7 (logging prefs) %d/%d mount8 (preboot cryptex version) %d/%d mount9 (user endpoints) %d/%d\n",
++	/* The staged third-party apps (native_gpu_addon10_stage), over /Applications as a union: the sealed system apps stay visible below
++	 * the addon's bundles. Scratch slot 0xe00 again: mount6's arguments were consumed by its mount() call before this one starts, and the
++	 * page has no free 0x100-byte slot left. */
++	static const char apps_source[] = "/private/var/ngpu/apps", apps_point[] = "/Applications";
++	native_gpu_addon_mount(p, scratch, 0xe00, apps_source, sizeof(apps_source), apps_point, sizeof(apps_point),
++	    "/Applications/MobileSafari.app", "/Applications/TrollStore.app", &native_gpu_addon10_stage, &native_gpu_addon10_status);
++	printf("GPUADDON mount6 (usr/bin) %d/%d mount7 (logging prefs) %d/%d mount8 (preboot cryptex version) %d/%d mount9 (user endpoints) %d/%d mount10 (/Applications) %d/%d\n",
+ 	    native_gpu_addon6_stage, native_gpu_addon6_status, native_gpu_addon7_stage, native_gpu_addon7_status, native_gpu_addon8_stage,
+-	    native_gpu_addon8_status, native_gpu_addon9_stage, native_gpu_addon9_status);
++	    native_gpu_addon8_status, native_gpu_addon9_stage, native_gpu_addon9_status, native_gpu_addon10_stage, native_gpu_addon10_status);
+ }
+ 
+ /* The deletable system apps (Weather, Notes, Calendar, ...) ship in the OS volume's /private/var/staged_system_apps. A restore copies
