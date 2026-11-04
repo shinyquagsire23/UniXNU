@@ -1,0 +1,100 @@
+diff --git a/NativeGOPPresenter.cpp b/NativeGOPPresenter.cpp
+--- a/NativeGOPPresenter.cpp
++++ b/NativeGOPPresenter.cpp
+@@ -9,6 +9,9 @@
+ #include <kern/clock.h>
+ #include <pexpert/pexpert.h>
+ #include "NativeGOPWire.h"
++// pdx203 (2026-11-04): op 4, the GPU client's copy of the delivered frame is on the GPU's queue (scheduled, not finished), an NGPComplete
++// with the frame's sequence. Later GPU work reaches the ring after it, so the compositor may draw again; the copy's end still completes.
++enum { NGP_METHOD_SCHEDULED_SWAP=4 };
+ extern "C" {
+ volatile uint32_t native_gop_ready,native_gop_failures;
+ volatile uint64_t native_gop_transfers,native_gop_bytes,native_gop_physical,native_gop_virtual;
+@@ -26,6 +29,8 @@
+ void native_gop_presenter_set_source(IOService *presenter,IOService *nub);
+ // Provided by the display driver: finishes (status 0) or fails the swap that was offered.
+ void native_legacy_gpu_complete(void *display,int status);
++// The GPU client submitted the frame's copy (NGP_METHOD_SCHEDULED_SWAP): the display may retire the swap now (NativeLegacyDisplay).
++void native_legacy_gpu_scheduled(void *display);
+ // A board's page flip: the scanout as all of its buffers (the GPU client maps it whole) and the buffer the offered frame goes to.
+ IOMemoryDescriptor *native_legacy_flip_memory(void) __attribute__((weak_import));
+ int native_legacy_flip_back_index(void) __attribute__((weak_import));
+@@ -49,6 +54,7 @@
+     uint64_t swapSequence=0;
+     IOReturn waitSwap(task_t,uint64_t timeoutMs,NGPSwap *);
+     IOReturn completeSwap(uint64_t sequence,int status);
++    IOReturn scheduledSwap(uint64_t sequence);
+     void abandonSwap();
+ public:
+     void setMemorySource(IOService *source) {memorySource=source;}
+@@ -205,6 +211,14 @@
+     native_legacy_gpu_complete(done.display,status);
+     native_gop_complete_returned=native_gop_complete_returned+1;return kIOReturnSuccess;
+ }
++IOReturn NativeGOPPresenter::scheduledSwap(uint64_t sequence) {
++    IOLockLock(gate);
++    if(!swap.offered || !swap.delivered || swap.sequence!=sequence) {IOLockUnlock(gate);return kIOReturnBadArgument;}
++    void *display=swap.display;
++    IOLockUnlock(gate);
++    native_legacy_gpu_scheduled(display);
++    return kIOReturnSuccess;
++}
+ // The client went away with a frame outstanding: the display driver is told it failed, so it can use its own path instead of waiting forever.
+ void NativeGOPPresenter::abandonSwap() {
+     if(!gate)return;
+@@ -253,6 +267,11 @@
+         NGPComplete q={};memcpy(&q,in,sizeof(q));
+         return p->completeSwap(q.sequence,(int)q.status);
+     }
++    case NGP_METHOD_SCHEDULED_SWAP: {
++        if(!in || inSize!=sizeof(NGPComplete) || outSize)return kIOReturnBadArgument;
++        NGPComplete q={};memcpy(&q,in,sizeof(q));
++        return p->scheduledSwap(q.sequence);
++    }
+     default:return kIOReturnUnsupported;
+     }
+ }
+diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
+--- a/NativeLegacyDisplay.cpp
++++ b/NativeLegacyDisplay.cpp
+@@ -92,6 +92,9 @@
+ extern "C" void native_legacy_vsync_observed(unsigned event,unsigned hz);
+ // The board's correction of the next refresh tick (mach time units, signed; pdx203 LegacyDisplayProbe.cpp: the tick follows the panel's TE).
+ extern "C" int64_t native_legacy_vsync_phase(uint64_t now,uint64_t interval) __attribute__((weak_import));
++// The board's runtime knob (pdx203 LegacyDisplayProbe.cpp, set over the USB control channel): 1 retires a GPU swap once its copy is
++// on the GPU's queue (gpuScheduled) instead of when the copy ends.
++extern "C" volatile int32_t pdx203_knob_eretire __attribute__((weak_import));
+ extern "C" uint64_t mach_continuous_time(void);
+ // 32-bit BGRA, plain ('BGRA') or in Apple's lossless-compressed spelling ('&BGA', one plane): the GPU that renders the surface here writes plain rows
+ // either way (no compression is implemented), so the bytes are the same.
+@@ -185,6 +188,24 @@
+     uint64_t gateWaitMax=0;
+     bool completing=false;   // the GPU completion runs in the gate (lane 0 of the gate stages)
+     unsigned lane() const {return completing?0:1;}
++    // The GPU client's copy of the offered frame is on the GPU's queue (NativeGOPPresenter op 4, before it waits for the copy). The compositor
++    // renders its next frame only after this swap retires, and retiring at the copy's end made each frame its render plus the copy and
++    // whatever GPU work ran ahead of it (pdx203 sa73: submission to copy end 4-6 ms for 72% of frames, 6-12 ms for 28%; 7.7% of frames
++    // missed a refresh). Any GPU work submitted from now on reaches the GPU's one ring after the copy, so the compositor may draw into the
++    // surface again (the early retirement at the offer, sheng-early-retire, came before the copy was even submitted and flickered). The
++    // copy's end then commits the flip and releases the next frame (finishGpuSwap's gpuRetired branch). Knob eretire=1; off by default.
++    void gpuScheduled() {
++        if(!&pdx203_knob_eretire || pdx203_knob_eretire!=1)return;
++        IOWorkLoop *loop=getWorkLoop();
++        auto action=[](OSObject *owner,void *,void *,void *,void *)->IOReturn {
++            NativeLegacyDisplay *d=static_cast<NativeLegacyDisplay *>(owner);
++            if(d->gpuRequest && !d->gpuRetired && d->retireSwap(d->gpuRequest,true)) {
++                d->gpuRetired=true;native_legacy_early_retires=native_legacy_early_retires+1;
++            }
++            return kIOReturnSuccess;
++        };
++        if(loop)loop->runAction(action,this);
++    }
+     void gpuComplete(int status) {
+         struct Args {NativeLegacyDisplay *display;int status;uint64_t asked;} args={this,status,mach_absolute_time()};
+         IOWorkLoop *loop=getWorkLoop();
+@@ -770,3 +791,4 @@
+     return at<cap?at:cap;
+ }
+ extern "C" void native_legacy_gpu_complete(void *display,int status) {if(display)static_cast<NativeLegacyDisplay *>(display)->gpuComplete(status);}
++extern "C" void native_legacy_gpu_scheduled(void *display) {if(display)static_cast<NativeLegacyDisplay *>(display)->gpuScheduled();}

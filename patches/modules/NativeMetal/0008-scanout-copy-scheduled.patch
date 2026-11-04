@@ -1,0 +1,83 @@
+diff --git a/GpuScanoutClient.h b/GpuScanoutClient.h
+--- a/GpuScanoutClient.h
++++ b/GpuScanoutClient.h
+@@ -63,6 +63,13 @@
+         note(0x6714);
+         scanout_ = scanout;
+         presenter_ = new gpupresent::Presenter(device, scanout);
++        // pdx203: the copy's submission goes to the display as op 4 (NativeMobileDisplay 0004), which retires the swap early when the
++        // board's knob eretire is 1 and ignores it otherwise; a refusal changes nothing here.
++        presenter_->onScheduled([](void *self) {
++            Client &c = *static_cast<Client *>(self);
++            NGPComplete scheduled = {c.sequence_, 0, 0};
++            if (c.transport_.call(c.transport_.context, kMethodScheduledSwap, &scheduled, sizeof scheduled, nullptr, 0) == 0) ++c.scheduledOk_;
++        }, this);
+         note(0x6715);
+         if (!presenter_->ready()) return fail(3, 0);
+         stats_->step = 4;
+@@ -95,6 +102,7 @@
+         // reserved: bits 31..24 the flip buffer plus one (0: the scanout's start), bits 23..0 the surface's mapping id
+         const uint32_t buffer = swap.reserved >> 24;
+         target_ = buffer ? (size_t)(buffer - 1) * frameBytes_ : 0;
++        sequence_ = swap.sequence;
+         const gpupresent::Result r = presenter_->present({(const void *)(uintptr_t)swap.address, (size_t)((swap.bytes + page - 1) & ~(page - 1)),
+                                                           (size_t)swap.stride, swap.width, swap.height, swap.reserved & 0xffffffu, swap.format,
+                                                           target_});
+@@ -134,7 +142,9 @@
+     Transport transport_ = {};
+     gpupresent::Presenter *presenter_ = nullptr;
+     gpupresent::Scanout scanout_ = {};
+-    size_t frameBytes_ = 0, target_ = 0;   // pdx203: one frame's bytes, and the offset of the buffer the last frame went to
++    size_t frameBytes_ = 0, target_ = 0;
++    static constexpr uint32_t kMethodScheduledSwap = 4;   // NGP_METHOD_SCHEDULED_SWAP (NativeMobileDisplay 0004 NativeGOPPresenter.cpp)
++    uint64_t sequence_ = 0, scheduledOk_ = 0;              // the frame being copied; op 4 calls the kernel accepted   // pdx203: one frame's bytes, and the offset of the buffer the last frame went to
+     Stats *stats_ = nullptr;
+ };
+ 
+diff --git a/GpuScanoutPresenter.h b/GpuScanoutPresenter.h
+--- a/GpuScanoutPresenter.h
++++ b/GpuScanoutPresenter.h
+@@ -50,6 +50,9 @@
+         target_ = [device newBufferWithBytesNoCopy:scanout.base length:scanout.bytes options:MTLResourceStorageModeShared deallocator:nil];
+     }
+     bool ready() const { return target_ != nil; }
++    // pdx203 (2026-11-04): told once the frame's copy is on the GPU's queue, before the wait for its end: the display may retire the swap
++    // then (NativeMobileDisplay 0004, knob eretire), as any later GPU work reaches the GPU after the copy.
++    void onScheduled(void (*call)(void *), void *context) { scheduledCall_ = call; scheduledContext_ = context; }
+     // One frame: encodes the GPU copy, commits, waits for the GPU. Rows are copied as whole rows of width*4 bytes.
+     Result present(const Frame &frame) {
+         if (!ready()) return kBadScanout;
+@@ -90,9 +93,16 @@
+         }
+         [blit endEncoding];
+         [commands commit];
++        noteScheduled(commands);
+         [commands waitUntilCompleted];
+         return commands.status == MTLCommandBufferStatusCompleted ? kOk : kGpuFailed;
+     }
++    void noteScheduled(id<MTLCommandBuffer> commands) {
++        if (!scheduledCall_) return;
++        [commands waitUntilScheduled];
++        if (commands.status >= MTLCommandBufferStatusScheduled && commands.status <= MTLCommandBufferStatusCompleted)
++            scheduledCall_(scheduledContext_);
++    }
+     // A half-float frame: one thread per pixel, 16 x 8 threads a group (the kernel skips threads past the edges).
+     Result convert(const Frame &frame) {
+         const size_t page = (size_t)getpagesize(), row = (size_t)frame.width * 8;
+@@ -116,6 +126,7 @@
+                 threadsPerThreadgroup:MTLSizeMake(16, 8, 1)];
+         [encoder endEncoding];
+         [commands commit];
++        noteScheduled(commands);
+         [commands waitUntilCompleted];
+         return commands.status == MTLCommandBufferStatusCompleted ? kOk : kGpuFailed;
+     }
+@@ -173,6 +184,8 @@
+     Scanout scanout_;
+     id<MTLCommandQueue> queue_;
+     id<MTLBuffer> target_;
++    void (*scheduledCall_)(void *) = nullptr;
++    void *scheduledContext_ = nullptr;
+     id<MTLComputePipelineState> convert_ = nil;
+     bool convertFailed_ = false;
+     id<MTLBuffer> tables_[2] = {nil, nil};

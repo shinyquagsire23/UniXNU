@@ -1,0 +1,20 @@
+diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
+--- a/NativeLegacyDisplay.cpp
++++ b/NativeLegacyDisplay.cpp
+@@ -90,6 +90,8 @@
+ // The unchanged original setDisplayRefreshProperties: publishes IOMFBDisplayRefresh from slot 301 (getRefreshAttributes below).
+ extern "C" bool native_legacy_set_refresh_properties(void *display);
+ extern "C" void native_legacy_vsync_observed(unsigned event,unsigned hz);
++// The board's correction of the next refresh tick (mach time units, signed; pdx203 LegacyDisplayProbe.cpp: the tick follows the panel's TE).
++extern "C" int64_t native_legacy_vsync_phase(uint64_t now,uint64_t interval) __attribute__((weak_import));
+ extern "C" uint64_t mach_continuous_time(void);
+ // 32-bit BGRA, plain ('BGRA') or in Apple's lossless-compressed spelling ('&BGA', one plane): the GPU that renders the surface here writes plain rows
+ // either way (no compression is implemented), so the bytes are the same.
+@@ -152,6 +154,7 @@
+         native_legacy_gate_lane[1][0]=was;
+         native_legacy_vsync_observed(1,vsyncHz);
+         vsyncNext+=vsyncInterval;
++        if(&native_legacy_vsync_phase)vsyncNext+=(uint64_t)native_legacy_vsync_phase(now,vsyncInterval);
+         if(vsyncNext<=now){vsyncNext=now+vsyncInterval;native_legacy_vsync_observed(3,vsyncHz);}
+         vsyncArmed=true;vsyncTimer->wakeAtTime(vsyncNext);
+     }
