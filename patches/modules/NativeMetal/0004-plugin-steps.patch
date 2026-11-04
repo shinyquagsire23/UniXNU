@@ -1,8 +1,8 @@
 diff --git a/NativeAdrenoMetalPlugin.mm b/NativeAdrenoMetalPlugin.mm
-index 987c395..e518fcb 100644
+index 987c395..5c707bd 100644
 --- a/NativeAdrenoMetalPlugin.mm
 +++ b/NativeAdrenoMetalPlugin.mm
-@@ -54,6 +54,20 @@ static bool requestedPath(const char *name, char *path, size_t size) {
+@@ -54,6 +54,27 @@ static bool requestedPath(const char *name, char *path, size_t size) {
      snprintf(slash + 1, size - size_t(slash + 1 - path), "%s", name);
      return access(path, R_OK) == 0;
  }
@@ -11,19 +11,47 @@ index 987c395..e518fcb 100644
 +// (WebKit.GPU, usb-174) still says how far it got.
 +static void step(unsigned port, const char *what, int error = 0) {
 +    static void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW | RTLD_LOCAL);
-+    static auto create = iokit ? (CFTypeRef (*)(unsigned, CFStringRef, CFAllocatorRef, uint32_t))dlsym(iokit, "IORegistryEntryCreateCFProperty") : nullptr;
-+    if (!create || !port) return;
++    (void)port;
 +    char key[40];
 +    snprintf(key, sizeof key, "NAM:%.24s %d", what, error);
-+    CFStringRef name = CFStringCreateWithCString(kCFAllocatorDefault, key, kCFStringEncodingUTF8);
-+    if (!name) return;
-+    if (CFTypeRef value = create(port, name, kCFAllocatorDefault, 0)) CFRelease(value);
-+    CFRelease(name);
++    // A sandboxed process may read only the properties its profile names (the WebKit GPU process: no "NAM:" read reached the kernel,
++    // sa40..43), but it may match services: the accelerator records a "NAMStep" key of a matching dictionary as the read above (sa44).
++    static auto matching = iokit ? (CFMutableDictionaryRef (*)(const char *))dlsym(iokit, "IOServiceMatching") : nullptr;
++    static auto getService = iokit ? (unsigned (*)(unsigned, CFDictionaryRef))dlsym(iokit, "IOServiceGetMatchingService") : nullptr;
++    static auto release = iokit ? (int (*)(unsigned))dlsym(iokit, "IOObjectRelease") : nullptr;
++    if (matching && getService) {
++        if (CFMutableDictionaryRef table = matching("IOAcceleratorES")) {
++            CFStringRef value = CFStringCreateWithCString(kCFAllocatorDefault, key + 4, kCFStringEncodingUTF8);
++            if (value) {CFDictionarySetValue(table, CFSTR("NAMStep"), value); CFRelease(value);}
++            if (unsigned found = getService(0, table)) {if (release) release(found);}   // consumes the table
++        }
++    }
 +}
  static bool requested() {
      char path[1024];
      return requestedPath("NativeAdrenoMetal.publish", path, sizeof path);
-@@ -358,9 +372,13 @@ static id deviceForPort(unsigned port) {
+@@ -164,6 +185,20 @@ static void removeHalfImported(const char *root) {
+ }
+ static unsigned gClientPort;
+ static void clientFailure(unsigned port, const char *step, const char *detail) {
++    // sa45: also as steps (the matching channel works where no connection opens, the WebKit GPU process's "no-device", sa44): the step
++    // name, then the detail in 21-character pieces "E<n>:<text>", five at most.
++    {
++        const char *d = detail ? detail : "";
++        if (!strncmp(d, "native-metal: ", 14)) d += 14;
++        publish::step(port, step);
++        const size_t length = strlen(d);
++        for (unsigned piece = 0; piece < 5 && piece * 21 < length; ++piece) {
++            char text[32];
++            snprintf(text, sizeof text, "E%u:%.21s", piece + 1, d + piece * 21);
++            for (char *c = text; *c; ++c) if (*c == ' ') *c = '_';
++            publish::step(port, text);
++        }
++    }
+     if (Gpu *gpu = makeGpu(port)) {
+         // The row holds 63 characters: the common prefix goes, and a long reason keeps its start (what was refused) and its end (why).
+         if (!detail) detail = "";
+@@ -358,9 +393,13 @@ static id deviceForPort(unsigned port) {
              // file every process gets one, as before. SpringBoard's device was lost right after its self-test (pdx203 usb-35..37,
              // "buffer refused: buffer: DeviceLost", no kernel method failing), and with it nothing past the boot logo was drawn.
              char list[1024];
@@ -39,7 +67,7 @@ index 987c395..e518fcb 100644
                      char name[128];
                      while (!named && fgets(name, sizeof name, file)) {
                          name[strcspn(name, "\r\n")] = 0;
-@@ -368,9 +386,12 @@ static id deviceForPort(unsigned port) {
+@@ -368,9 +407,12 @@ static id deviceForPort(unsigned port) {
                      }
                      fclose(file);
                  }
@@ -54,8 +82,17 @@ index 987c395..e518fcb 100644
          }
          // The discovery releases the accelerator port when it is done; the monitor and the scanout client keep using it.
          if (void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW | RTLD_LOCAL)) {
-@@ -665,7 +686,9 @@ static id deviceForPort(unsigned port) {
+@@ -661,11 +703,18 @@ static id deviceForPort(unsigned port) {
+ }
+ }  // namespace publish
+ 
++__attribute__((constructor)) static void notePluginLoaded() {
++    if (strcmp(getprogname(), "backboardd")) publish::step(0, "loaded");
++}
++
+ @implementation NativeAdrenoMetalDevice
  - (id)initWithAcceleratorPort:(unsigned)port {
++    if (strcmp(getprogname(), "backboardd")) publish::step(port, port ? "init-called" : "init-port0");
      self = [super init];
      if (!self || !port) return nil;
 -    if (publish::requested()) return publish::deviceForPort(port);

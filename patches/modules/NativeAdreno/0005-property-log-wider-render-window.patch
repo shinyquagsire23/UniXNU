@@ -1,5 +1,5 @@
 diff --git a/NativeAdrenoPublish.cpp b/NativeAdrenoPublish.cpp
-index 968ed28..48d3a26 100644
+index 968ed28..47b3f0d 100644
 --- a/NativeAdrenoPublish.cpp
 +++ b/NativeAdrenoPublish.cpp
 @@ -116,10 +116,15 @@ char native_adreno_plugin_steps[8][48];
@@ -27,7 +27,7 @@ index 968ed28..48d3a26 100644
 +     * (WebKit.GPU reads MetalPluginName and never runs the plugin: which keys Metal reads before it gives up). */
 +    char name[20]={};
 +    proc_selfname(name,sizeof name);
-+    if(key && strcmp(name,"backboardd")) {
++    if(key && strcmp(name,"backboardd") && strcmp(key,"BSD Name") && strcmp(key,"IOBusyInterest")) {
 +        char entry[48];
 +        snprintf(entry,sizeof entry,"%.19s %.27s",name,key);
 +        if(!strncmp(native_adreno_property_log[0],entry,sizeof entry))native_adreno_property_log_repeat[0]=native_adreno_property_log_repeat[0]+1;

@@ -215,7 +215,7 @@ index e51fc78..68e0b98 100644
  };
  
 diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
-index 3eb29ed..03df1ef 100644
+index 3eb29ed..8a3e251 100644
 --- a/src/freedreno/vulkan/tu_knl_darwin.cc
 +++ b/src/freedreno/vulkan/tu_knl_darwin.cc
 @@ -70,6 +70,7 @@ struct darwin_retired_bo {
@@ -250,7 +250,75 @@ index 3eb29ed..03df1ef 100644
  };
  static struct darwin_retire_state *darwin_stats_state;   /* for tu_darwin_bo_cache_stats */
  
-@@ -796,8 +807,8 @@ darwin_reap_locked(struct tu_device *dev, struct darwin_retire_state *retire)
+@@ -280,6 +291,27 @@ dw_probe_selector(struct darwin_conn *c)
+    return false;
+ }
+ 
++/* pdx203 sa46: why a connection did not open, where the startup log is not read (a sandboxed process: the WebKit GPU process's device
++ * failed with VK_ERROR_INITIALIZATION_FAILED and no open reached the kernel, sa45): a match of the accelerator with a "NAMStep" key, which
++ * the accelerator records in the kernel's PLUGSTEP ring (NativeAdreno 0006). */
++static void
++dw_note_step(const char *what, uint32_t code)
++{
++   CFMutableDictionaryRef table = IOServiceMatching("IOAcceleratorES");
++   if (!table)
++      return;
++   char text[40];
++   snprintf(text, sizeof(text), "tu-%s %x", what, code);
++   CFStringRef value = CFStringCreateWithCString(kCFAllocatorDefault, text, kCFStringEncodingUTF8);
++   if (value) {
++      CFDictionarySetValue(table, CFSTR("NAMStep"), value);
++      CFRelease(value);
++   }
++   io_service_t found = IOServiceGetMatchingService(kIOMainPortDefault, table);
++   if (found)
++      IOObjectRelease(found);
++}
++
+ static VkResult
+ dw_open_connection(struct darwin_conn *c, struct tu_instance *instance)
+ {
+@@ -295,17 +327,21 @@ dw_open_connection(struct darwin_conn *c, struct tu_instance *instance)
+       open_type = 0;
+    io_service_t service = IOServiceGetMatchingService(
+       kIOMainPortDefault, IOServiceMatching(service_name));
+-   if (!service)
++   if (!service) {
++      dw_note_step("no-service", 0);
+       return VK_ERROR_INCOMPATIBLE_DRIVER;
++   }
+ 
+    kern_return_t kr = IOServiceOpen(service, mach_task_self(), open_type, &c->conn);
+    IOObjectRelease(service);
+    if (kr != KERN_SUCCESS) {
++      dw_note_step("open", kr);
+       return vk_startup_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
+                                "IOServiceOpen(%s, 0x%x) failed: 0x%x", service_name, open_type, kr);
+    }
+    c->tunnel = !direct;
+    if (c->tunnel && !dw_probe_selector(c)) {
++      dw_note_step("selector", 0);
+       IOServiceClose(c->conn);
+       c->conn = 0;
+       return vk_startup_errorf(instance, VK_ERROR_INITIALIZATION_FAILED, "no external-method selector is admitted for this process");
+@@ -317,6 +353,7 @@ dw_open_connection(struct darwin_conn *c, struct tu_instance *instance)
+    if (kr == KERN_SUCCESS)
+       kr = dw_call(c, NativeAdrenoMethodGetDeviceInfo, NULL, 0, &c->info, sizeof(c->info));
+    if (kr != KERN_SUCCESS) {
++      dw_note_step("query", kr);
+       IOServiceClose(c->conn);
+       c->conn = 0;
+       return vk_startup_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
+@@ -325,6 +362,8 @@ dw_open_connection(struct darwin_conn *c, struct tu_instance *instance)
+    c->open = true;
+    c->inflight_count = 0;
+    c->last_fence = 0;
++   if (strcmp(getprogname(), "backboardd"))
++      dw_note_step("window", (uint32_t)(c->info.va_size >> 20));   /* sa50: the GPU window this client got (MiB) */
+    return VK_SUCCESS;
+ }
+ 
+@@ -796,8 +835,8 @@ darwin_reap_locked(struct tu_device *dev, struct darwin_retire_state *retire)
     unsigned kept = 0;
     for (unsigned i = 0; i < total; ++i) {
        struct darwin_retired_bo *bo = &retire->entries[(retire->head + i) % retire->capacity];
@@ -261,7 +329,59 @@ index 3eb29ed..03df1ef 100644
           if (have_pending_fence && bo->fence == pending_fence) {
              ready = false;
           } else if (!have_completed_fence || bo->fence != completed_fence) {
-@@ -1149,6 +1160,8 @@ darwin_wait_idle(struct tu_device *dev)
+@@ -924,8 +963,11 @@ darwin_bo_init(struct tu_device *dev, struct vk_object_base *base,
+          if (any)
+             continue;
+       }
+-      if (result != VK_SUCCESS)
++      if (result != VK_SUCCESS) {
++         /* sa50: the WebKit GPU process's device failed with OutOfMemory(Device) (sa49): which allocation, and how large (KiB). */
++         dw_note_step("va", (uint32_t)(alloc_size >> 10));
+          return result;
++      }
+ 
+       NativeAdrenoAbiBoAlloc alloc = {.bytes = alloc_size, .align_log2 = 12, .contiguous = 0};
+       NativeAdrenoAbiBoAllocReply reply = {};
+@@ -941,6 +983,7 @@ darwin_bo_init(struct tu_device *dev, struct vk_object_base *base,
+             if (any)
+                continue;
+          }
++         dw_note_step("boalloc", kr);
+          return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY, "BoAlloc failed: 0x%x", kr);
+       }
+ 
+@@ -954,6 +997,7 @@ darwin_bo_init(struct tu_device *dev, struct vk_object_base *base,
+       NativeAdrenoAbiBoMapReply mapped = {};
+       kr = dw_call(dwc(dev), NativeAdrenoMethodBoMap, &map, sizeof(map), &mapped, sizeof(mapped));
+       if (kr != KERN_SUCCESS) {
++         dw_note_step("bomap", kr);
+          return darwin_map_failure(dev, reply.handle, iova, alloc_size, kr, !lazy_vma);
+       }
+       handle = reply.handle;
+@@ -1080,8 +1124,10 @@ darwin_bo_map(struct tu_device *dev, struct tu_bo *bo, void *placed_addr)
+    NativeAdrenoAbiBoCpuMap req = {.handle = bo->darwin_handle};
+    NativeAdrenoAbiBoCpuMapReply reply = {};
+    kern_return_t kr = dw_call(dwc(dev), NativeAdrenoMethodBoCpuMap, &req, sizeof(req), &reply, sizeof(reply));
+-   if (kr != KERN_SUCCESS)
++   if (kr != KERN_SUCCESS) {
++      dw_note_step("cpumap", kr);
+       return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED, "BoCpuMap failed: 0x%x", kr);
++   }
+ 
+    mach_vm_address_t address = (mach_vm_address_t)(uintptr_t)placed_addr;
+    mach_vm_size_t length = 0;
+@@ -1094,6 +1140,10 @@ darwin_bo_map(struct tu_device *dev, struct tu_bo *bo, void *placed_addr)
+                       ((dwc(dev)->params.flags & 2u /* NativeAdrenoParamsOwnedCoherent: Adreno740 only, never set by Adreno650 */) ? kIOMapCopybackCache : kIOMapWriteCombineCache);
+    kr = IOConnectMapMemory64(dwc(dev)->conn, reply.token, mach_task_self(), &address, &length, options);
+    if (kr != KERN_SUCCESS || !address || length < bo->size) {
++      /* sa48: the WebKit GPU process's device failed with VK_ERROR_MEMORY_MAP_FAILED once it could open (sa47). */
++      char what[24];
++      snprintf(what, sizeof(what), "ucmap%s%llu", placed_addr ? "@" : " ", (unsigned long long)(bo->size >> 10));
++      dw_note_step(what, kr ? (uint32_t)kr : (uint32_t)(length >> 10));
+       NativeAdrenoAbiBoCpuUnmap undo = {.handle = bo->darwin_handle, .token = reply.token};
+       dw_call(dwc(dev), NativeAdrenoMethodBoCpuUnmap, &undo, sizeof(undo), NULL, 0);
+       return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED, "IOConnectMapMemory64 failed: 0x%x", kr);
+@@ -1149,6 +1199,8 @@ darwin_wait_idle(struct tu_device *dev)
     return VK_SUCCESS;
  }
  
@@ -270,7 +390,7 @@ index 3eb29ed..03df1ef 100644
  static void
  darwin_bo_finish(struct tu_device *dev, struct tu_bo *bo)
  {
-@@ -1195,8 +1208,14 @@ darwin_bo_finish(struct tu_device *dev, struct tu_bo *bo)
+@@ -1195,8 +1247,14 @@ darwin_bo_finish(struct tu_device *dev, struct tu_bo *bo)
        uint32_t fence = dwc(dev)->last_fence;
        pthread_mutex_unlock(&dwc(dev)->lock);
        unsigned slot = (retire->head + retire->count) % retire->capacity;
@@ -286,7 +406,7 @@ index 3eb29ed..03df1ef 100644
        ++retire->count;
        ++retire->enqueued;
        darwin_reap_locked(dev, retire);
-@@ -1215,21 +1234,72 @@ darwin_bo_finish(struct tu_device *dev, struct tu_bo *bo)
+@@ -1215,21 +1273,72 @@ darwin_bo_finish(struct tu_device *dev, struct tu_bo *bo)
  
  /* ---- submissions ---- */
  
@@ -364,7 +484,7 @@ index 3eb29ed..03df1ef 100644
     util_dynarray_fini(&submit->commands);
     vk_free(&device->vk.alloc, submit);
  }
-@@ -1239,15 +1309,22 @@ darwin_submit_add_entries(struct tu_device *device, void *_submit,
+@@ -1239,15 +1348,22 @@ darwin_submit_add_entries(struct tu_device *device, void *_submit,
                            struct tu_cs_entry *entries, unsigned num_entries)
  {
     struct tu_darwin_queue_submit *submit = (struct tu_darwin_queue_submit *)_submit;
