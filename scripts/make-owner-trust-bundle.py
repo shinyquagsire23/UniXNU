@@ -1,14 +1,30 @@
 #!/usr/bin/env python3
 """Build the trust bundle for the boot image: one owner module for the Adreno Metal plugin, then the two original Apple
 trust modules byte for byte. Output: build/adreno-metal-plugin/owner-trust.bundle (ignored). The original modules are
-verified unchanged against build/original-static-system-trust; only the plugin's CDHash is added."""
+verified unchanged against build/original-static-system-trust; only the plugin's CDHash is added.
+
+  make-owner-trust-bundle.py [--extra-trust FILE ...]
+
+--extra-trust adds the CDHash of FILE (JSON {"cdhash": ...}, as a board's own userland build writes it: pdx203's unified-log
+forwarder, its audio server plug-in) to the owner module; it may be given more than once."""
 import hashlib
 import json
+import sys
 from pathlib import Path
 import struct
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
+args = sys.argv[1:]
+extra = []
+while '--extra-trust' in args:
+    at = args.index('--extra-trust')
+    if at + 1 >= len(args):
+        raise SystemExit(__doc__)
+    extra.append(bytes.fromhex(json.loads(Path(args[at + 1]).read_text())['cdhash']))
+    del args[at:at + 2]
+if args:
+    raise SystemExit(__doc__)
 original = (ROOT / 'build/original-static-system-trust/original-static-system.bundle').read_bytes()
 if hashlib.sha256(original).hexdigest() != '7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7':
     raise SystemExit('The original static/System trust bundle differs from the unchanged target input')
@@ -29,8 +45,8 @@ if cryptex_trust.is_file():
     cryptex_hashes = [module[24 + 24 * entry:24 + 24 * entry + 20] for entry in range(entries)]
 # DarwinBoot's ValidTrustCaches (and the kernel's binary search) need the hashes of a module in strictly ascending order.
 hashes = sorted({bytes.fromhex(trust['cdhash']), bytes.fromhex(trust['daemon_cdhash']),
-                 bytes.fromhex(trust['turnip_cdhash']), *cryptex_hashes})
-if len(hashes) != 3 + len(set(cryptex_hashes)):
+                 bytes.fromhex(trust['turnip_cdhash']), *cryptex_hashes, *extra})
+if len(hashes) != 3 + len(set(cryptex_hashes) | set(extra)):
     raise SystemExit('Duplicate CDHash')
 cdhash = hashes[0]
 identifier = uuid.uuid5(uuid.NAMESPACE_URL, 'org.blu-sharky.adreno-metal:' + ''.join(h.hex() for h in hashes))
