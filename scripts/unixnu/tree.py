@@ -43,6 +43,38 @@ def _copy_scripts(source, destination):
         shutil.copy2(path, target)
 
 
+def apply_module_patches(ctx, modules):
+    """Apply the device repository's patches/modules/<module>/*.patch to each resolved module's checkout.
+
+    A device's changes to a shared module (a submodule of this repository, a feed or a device submodule) ride as patch files in
+    the device repository, never as commits of the module, so a fresh checkout reproduces them. They apply as a stack in name
+    order: the applied part is the longest prefix whose last patch reverses, the rest is applied; one that applies neither way
+    stops the build. The checkout is left modified, which "unixnu fetch" treats as local development and does not reset."""
+    import subprocess
+    root = Path(ctx.device) / 'patches/modules'
+    if not root.is_dir():
+        return
+    for directory in sorted(path for path in root.iterdir() if path.is_dir()):
+        module = next((module for (kind, name), module in modules.items()
+                       if name == directory.name and module.path is not None and kind in ('driver', 'kit')), None)
+        if module is None:
+            continue
+        target = Path(module.path).resolve()
+        patches = sorted(directory.glob('*.patch'))
+        def git_apply(*args):
+            return subprocess.run(['git', '-C', str(target), 'apply', *args], capture_output=True, text=True)
+        applied = 0
+        for k in range(len(patches), 0, -1):
+            if git_apply('--reverse', '--check', str(patches[k - 1])).returncode == 0:
+                applied = k
+                break
+        for patch in patches[applied:]:
+            result = git_apply(str(patch))
+            if result.returncode:
+                raise Error(f'module patch {patch} does not apply to {target}: {result.stderr.strip()}')
+            log(f'tree: applied {patch.name} to {directory.name}')
+
+
 def assemble(ctx, modules):
     log(f'tree {ctx.tree}')
     tree = ctx.tree
@@ -100,4 +132,5 @@ def assemble(ctx, modules):
             if not link.exists() or link.is_symlink():
                 _link(target, link)
     components.sync_outputs(ctx, modules)
+    apply_module_patches(ctx, modules)
     return tree
