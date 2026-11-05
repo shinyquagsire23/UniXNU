@@ -1,0 +1,130 @@
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -10,6 +10,7 @@
+ 
+ #include "tu_cmd_buffer.h"
+ 
++#include "vk_command_pool.h"
+ #include "vk_common_entrypoints.h"
+ #include "vk_log.h"
+ #include "vk_render_pass.h"
+@@ -4502,10 +4503,15 @@ tu_cmd_buffer_destroy(struct vk_command_buffer *vk_cmd_buffer)
+ 
+ static void
+ tu_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
+-                    UNUSED VkCommandBufferResetFlags flags)
++                    VkCommandBufferResetFlags flags)
+ {
+    struct tu_cmd_buffer *cmd_buffer =
+       container_of(vk_cmd_buffer, struct tu_cmd_buffer, vk);
++   /* A transient pool's command buffers, or a reset asked to release resources, keep no command-stream BO: an idle command buffer
++    * holds no GPU memory, and its next recording takes BOs from the kernel backend's cache (tu_cs_reset_retaining). */
++   const uint32_t keep =
++      ((flags & VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT) ||
++       (vk_cmd_buffer->pool && (vk_cmd_buffer->pool->flags & VK_COMMAND_POOL_CREATE_TRANSIENT_BIT))) ? 0 : TU_CS_RETAINED_BO_DWORDS;
+ 
+    VkResult status_check_result = VK_SUCCESS;
+    if (TU_DEBUG_START(CHECK_CMD_BUFFER_STATUS))
+@@ -4518,13 +4524,13 @@ tu_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
+        cmd_buffer->vk.record_result = status_check_result;
+     }
+ 
+-   tu_cs_reset(&cmd_buffer->cs);
+-   tu_cs_reset(&cmd_buffer->draw_cs);
+-   tu_cs_reset(&cmd_buffer->tile_store_cs);
+-   tu_cs_reset(&cmd_buffer->draw_epilogue_cs);
+-   tu_cs_reset(&cmd_buffer->sub_cs);
+-   tu_cs_reset(&cmd_buffer->pre_chain.draw_cs);
+-   tu_cs_reset(&cmd_buffer->pre_chain.draw_epilogue_cs);
++   tu_cs_reset_retaining(&cmd_buffer->cs, keep);
++   tu_cs_reset_retaining(&cmd_buffer->draw_cs, keep);
++   tu_cs_reset_retaining(&cmd_buffer->tile_store_cs, keep);
++   tu_cs_reset_retaining(&cmd_buffer->draw_epilogue_cs, keep);
++   tu_cs_reset_retaining(&cmd_buffer->sub_cs, keep);
++   tu_cs_reset_retaining(&cmd_buffer->pre_chain.draw_cs, keep);
++   tu_cs_reset_retaining(&cmd_buffer->pre_chain.draw_epilogue_cs, keep);
+ 
+    cmd_buffer->autotune_ctx.reset(*cmd_buffer->device->autotune);
+ 
+diff --git a/src/freedreno/vulkan/tu_cs.cc b/src/freedreno/vulkan/tu_cs.cc
+--- a/src/freedreno/vulkan/tu_cs.cc
++++ b/src/freedreno/vulkan/tu_cs.cc
+@@ -34,6 +34,7 @@ tu_cs_init(struct tu_cs *cs,
+    cs->device = device;
+    cs->mode = mode;
+    cs->next_bo_size = initial_size;
++   cs->initial_bo_size = initial_size;
+    cs->name = name;
+ }
+ 
+@@ -502,6 +503,20 @@ tu_cs_reserve_space(struct tu_cs *cs, uint32_t reserved_size)
+  */
+ void
+ tu_cs_reset(struct tu_cs *cs)
++{
++   tu_cs_reset_retaining(cs, TU_CS_RETAINED_BO_DWORDS);
++}
++
++/* As tu_cs_reset, keeping no BO larger than max_dwords (0: none at all).
++ *
++ * A command buffer recycled for the life of the device (the Metal runtime keeps its command pools and command buffers and begins them
++ * again, which resets them) kept its last BO at every reset, the largest its recording ever grew to (each new BO doubles, up to the IB
++ * limit), and next_bo_size never came back down: every command stream held the high-water of its busiest recording, and a render
++ * server's hundreds of them grew with each app switch (pdx203 backboardd: about 300 MiB of 256 KiB to 4 MiB stream BOs after a few
++ * Safari background/foreground passes, the GPU pool full). A last BO above max_dwords is given back with the others and growth starts
++ * again from the stream's initial size; a long recording takes its BOs anew, from the kernel backend's BO cache. */
++void
++tu_cs_reset_retaining(struct tu_cs *cs, uint32_t max_dwords)
+ {
+    if (cs->mode == TU_CS_MODE_EXTERNAL) {
+       assert(!cs->read_only.bo_count && !cs->read_write.bo_count &&
+@@ -522,6 +537,24 @@ tu_cs_reset(struct tu_cs *cs)
+ 
+    assert(!cs->writeable);
+ 
++   if (cs->read_only.bo_count &&
++       cs->read_only.bos[cs->read_only.bo_count - 1]->size > (uint64_t)max_dwords * sizeof(uint32_t)) {
++      TU_RMV(resource_destroy, cs->device, cs->read_only.bos[cs->read_only.bo_count - 1]);
++      tu_bo_finish(cs->device, cs->read_only.bos[cs->read_only.bo_count - 1]);
++      cs->read_only.bo_count = 0;
++      cs->start = cs->cur = cs->reserved_end = cs->end = NULL;
++      if (cs->initial_bo_size)
++         cs->next_bo_size = cs->initial_bo_size;
++   }
++   if (cs->read_write.bo_count &&
++       cs->read_write.bos[cs->read_write.bo_count - 1]->size > (uint64_t)max_dwords * sizeof(uint32_t)) {
++      TU_RMV(resource_destroy, cs->device, cs->read_write.bos[cs->read_write.bo_count - 1]);
++      tu_bo_finish(cs->device, cs->read_write.bos[cs->read_write.bo_count - 1]);
++      cs->read_write.bo_count = 0;
++      if (cs->initial_bo_size)
++         cs->next_bo_size = cs->initial_bo_size;
++   }
++
+    if (cs->read_only.bo_count) {
+       cs->read_only.bos[0] = cs->read_only.bos[cs->read_only.bo_count - 1];
+       cs->read_only.bo_count = 1;
+diff --git a/src/freedreno/vulkan/tu_cs.h b/src/freedreno/vulkan/tu_cs.h
+--- a/src/freedreno/vulkan/tu_cs.h
++++ b/src/freedreno/vulkan/tu_cs.h
+@@ -95,6 +95,7 @@ struct tu_cs
+    enum tu_cs_mode mode;
+    bool writeable;
+    uint32_t next_bo_size;
++   uint32_t initial_bo_size; /* next_bo_size at init, where a reset that gives back its BOs starts again */
+ 
+    struct tu_cs_entry *entries;
+    uint32_t entry_count;
+@@ -212,6 +213,12 @@ tu_cs_draw_state(struct tu_cs *sub_cs, struct tu_cs *cs, uint32_t size)
+ void
+ tu_cs_reset(struct tu_cs *cs);
+ 
++/* The largest command-stream BO tu_cs_reset keeps (in dwords): 64 KiB. */
++#define TU_CS_RETAINED_BO_DWORDS 16384
++
++void
++tu_cs_reset_retaining(struct tu_cs *cs, uint32_t max_dwords);
++
+ VkResult
+ tu_cs_add_entries(struct tu_cs *cs, struct tu_cs *target);
+ 
