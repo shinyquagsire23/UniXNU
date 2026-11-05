@@ -274,7 +274,7 @@ new file mode 100644
 index 0000000..b03c6ee
 --- /dev/null
 +++ b/src/freedreno/vulkan/tu_knl_darwin.cc
-@@ -0,0 +1,1609 @@
+@@ -0,0 +1,1630 @@
 +/*
 + * Native Darwin kernel backend for Turnip: talks to the NativeAdreno IOKit user client (NativeAdrenoABI.h, version 1).
 + * Modelled on tu_knl_kgsl.cc (no libdrm) and tu_knl_drm_msm.cc (the client chooses GPU addresses).
@@ -909,6 +909,21 @@ index 0000000..b03c6ee
 +   for (unsigned i = retire->cache_count; i-- > 0;)
 +      if (now - retire->cache[i].freed_s > 1)
 +         darwin_cache_evict(dev, retire, i);
++   /* pdx203: the render server's GPU memory climbs with each app switch. Once a second its cache and retire queue go to the kernel as a
++    * "W" status line (the board's METAL report2 row): BOs cached and their MiB, BOs waiting on a fence and their MiB, evictions, flushes. */
++   static const bool report = !strcmp(getprogname(), "backboardd");
++   if (report) {
++      uint64_t waiting = 0;
++      for (unsigned i = 0; i < retire->count; ++i)
++         waiting += retire->entries[(retire->head + i) % retire->capacity].size;
++      NativeAdrenoAbiMetadata line = {};
++      int n = snprintf(line.text, sizeof(line.text), "W c%u/%lluM r%u/%lluM e%llu f%llu h%llu/%llu", retire->cache_count,
++                       (unsigned long long)(retire->cache_bytes >> 20), retire->count, (unsigned long long)(waiting >> 20),
++                       (unsigned long long)retire->cache_stats.evictions, (unsigned long long)retire->cache_stats.flushes,
++                       (unsigned long long)retire->cache_stats.hits, (unsigned long long)retire->cache_stats.lookups);
++      line.bytes = n < 0 ? 0 : MIN2((unsigned)n, (unsigned)sizeof(line.text));
++      (void)dw_call(NativeAdrenoMethodSetMetadata, &line, sizeof(line), NULL, 0);
++   }
 +}
 +
 +/* The process's memory-pressure source, made once: libdispatch delivers the kernel's memorystatus levels to it. */
@@ -1306,6 +1321,15 @@ index 0000000..b03c6ee
 +      TU_RMV(bo_unmap, dev, bo);
 +   TU_RMV(bo_destroy, dev, bo);
 +
++   /* The BO structs live in a sparse array indexed by handle, and the cache below hands this handle to the next allocation of its
++    * class as soon as its fence completed, before this function returns: an allocation waiting on retire->lock filled this very
++    * struct, then the memset below wiped it, and the new owner went on with a zeroed BO (iova 0, size 0, no map), its command
++    * stream pointing at addresses nothing maps (backboardd: GPU faults in its own IB2s, stores past a CPU view's end). As
++    * msm_bo_finish does before tu_gem_close, the entry is freed before its handle can be reused: the record takes its fields. */
++   const struct darwin_retired_bo record = {bo->darwin_handle, bo->iova, bo->darwin_alloc_size ? bo->darwin_alloc_size : bo->size, bo->map,
++                                            bo->darwin_token, 0, bo->darwin_alloc_size != 0, bo->darwin_read_only};
++   memset(bo, 0, sizeof(*bo));
++
 +   struct darwin_retire_state *retire = (struct darwin_retire_state *)dev->darwin_retire;
 +   pthread_mutex_lock(&retire->lock);
 +   darwin_reap_locked(dev, retire);
@@ -1327,8 +1351,8 @@ index 0000000..b03c6ee
 +      uint32_t fence = dw.last_fence;
 +      pthread_mutex_unlock(&dw.lock);
 +      unsigned slot = (retire->head + retire->count) % retire->capacity;
-+      retire->entries[slot] = {bo->darwin_handle, bo->iova, bo->darwin_alloc_size ? bo->darwin_alloc_size : bo->size, bo->map,
-+                               bo->darwin_token, fence, bo->darwin_alloc_size != 0, bo->darwin_read_only};
++      retire->entries[slot] = record;
++      retire->entries[slot].fence = fence;
 +      ++retire->count;
 +      ++retire->enqueued;
 +      darwin_reap_locked(dev, retire);
@@ -1338,9 +1362,6 @@ index 0000000..b03c6ee
 +      retire->failure = vk_device_set_lost(&dev->vk, "deferred BO queue cannot grow; retaining native allocation");
 +   }
 +   pthread_mutex_unlock(&retire->lock);
-+
-+   /* The BO structs live in a sparse array: zero the entry to mark it free. */
-+   memset(bo, 0, sizeof(*bo));
 +
 +   u_rwlock_rdunlock(&dev->dma_bo_lock);
 +}
