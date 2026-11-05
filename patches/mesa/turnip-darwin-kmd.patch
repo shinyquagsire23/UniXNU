@@ -274,7 +274,7 @@ new file mode 100644
 index 0000000..b03c6ee
 --- /dev/null
 +++ b/src/freedreno/vulkan/tu_knl_darwin.cc
-@@ -0,0 +1,1630 @@
+@@ -0,0 +1,1709 @@
 +/*
 + * Native Darwin kernel backend for Turnip: talks to the NativeAdreno IOKit user client (NativeAdrenoABI.h, version 1).
 + * Modelled on tu_knl_kgsl.cc (no libdrm) and tu_knl_drm_msm.cc (the client chooses GPU addresses).
@@ -285,6 +285,7 @@ index 0000000..b03c6ee
 +#include <pthread.h>
 +#include <stdio.h>
 +#include <stdlib.h>
++#include <unordered_map>
 +#include <string.h>
 +#include <sys/mman.h>
 +#include <unistd.h>
@@ -889,6 +890,63 @@ index 0000000..b03c6ee
 +   return any;
 +}
 +
++/* pdx203: live BOs per allocation name in the render server (backboardd's GPU memory climbs with each app switch while Turnip's cache
++ * holds nothing): count and bytes per name, the trim tick reports one name a second in the "W" status line, in turn. */
++struct darwin_name_stat {
++   char name[24];
++   uint64_t bytes;
++   uint32_t count;
++};
++static struct darwin_name_stat darwin_names[32];
++static pthread_mutex_t darwin_names_lock = PTHREAD_MUTEX_INITIALIZER;
++static std::unordered_map<uint64_t, uint8_t> *darwin_name_of;   /* handle -> darwin_names index */
++static bool
++darwin_reporting(void)
++{
++   static const bool on = !strcmp(getprogname(), "backboardd");
++   return on;
++}
++static void
++darwin_name_alloc(uint64_t handle, const char *name, uint64_t bytes)
++{
++   if (!darwin_reporting())
++      return;
++   if (!name)
++      name = "?";
++   pthread_mutex_lock(&darwin_names_lock);
++   if (!darwin_name_of)
++      darwin_name_of = new std::unordered_map<uint64_t, uint8_t>();
++   unsigned at = 0;
++   while (at < ARRAY_SIZE(darwin_names) && darwin_names[at].name[0] && strncmp(darwin_names[at].name, name, sizeof(darwin_names[at].name) - 1))
++      ++at;
++   if (at == ARRAY_SIZE(darwin_names))
++      at = ARRAY_SIZE(darwin_names) - 1;   /* the last slot takes every name past the table */
++   if (!darwin_names[at].name[0])
++      strlcpy(darwin_names[at].name, name, sizeof(darwin_names[at].name));
++   darwin_names[at].bytes += bytes;
++   ++darwin_names[at].count;
++   (*darwin_name_of)[handle] = (uint8_t)at;
++   pthread_mutex_unlock(&darwin_names_lock);
++}
++static void
++darwin_name_free(uint64_t handle, uint64_t bytes)
++{
++   if (!darwin_reporting())
++      return;
++   pthread_mutex_lock(&darwin_names_lock);
++   if (darwin_name_of) {
++      auto found = darwin_name_of->find(handle);
++      if (found != darwin_name_of->end()) {
++         struct darwin_name_stat *s = &darwin_names[found->second];
++         s->bytes = s->bytes > bytes ? s->bytes - bytes : 0;
++         if (s->count)
++            --s->count;
++         darwin_name_of->erase(found);
++      }
++   }
++   pthread_mutex_unlock(&darwin_names_lock);
++}
++
 +/* Called under retire->lock: once per memory-pressure notification the whole cache goes back, and otherwise every BO not reused
 + * within a second of entering it, as freedreno's own BO cache keeps a freed BO (freedreno_bo_cache.c, fd_bo_cache_cleanup: "keep things
 + * in cache for at least 1 second", at most once a second). Without the second rule the cache held every BO the render server ever freed
@@ -911,16 +969,34 @@ index 0000000..b03c6ee
 +         darwin_cache_evict(dev, retire, i);
 +   /* pdx203: the render server's GPU memory climbs with each app switch. Once a second its cache and retire queue go to the kernel as a
 +    * "W" status line (the board's METAL report2 row): BOs cached and their MiB, BOs waiting on a fence and their MiB, evictions, flushes. */
-+   static const bool report = !strcmp(getprogname(), "backboardd");
-+   if (report) {
++   if (darwin_reporting()) {
 +      uint64_t waiting = 0;
 +      for (unsigned i = 0; i < retire->count; ++i)
 +         waiting += retire->entries[(retire->head + i) % retire->capacity].size;
 +      NativeAdrenoAbiMetadata line = {};
-+      int n = snprintf(line.text, sizeof(line.text), "W c%u/%lluM r%u/%lluM e%llu f%llu h%llu/%llu", retire->cache_count,
-+                       (unsigned long long)(retire->cache_bytes >> 20), retire->count, (unsigned long long)(waiting >> 20),
-+                       (unsigned long long)retire->cache_stats.evictions, (unsigned long long)retire->cache_stats.flushes,
-+                       (unsigned long long)retire->cache_stats.hits, (unsigned long long)retire->cache_stats.lookups);
++      int n;
++      /* Every third second the cache and retire queue, otherwise the next allocation name with live BOs (count, MiB). */
++      static unsigned tick, next_name;
++      struct darwin_name_stat shown = {};
++      if (++tick % 3) {
++         pthread_mutex_lock(&darwin_names_lock);
++         for (unsigned k = 0; k < ARRAY_SIZE(darwin_names); ++k) {
++            const unsigned at = (next_name + k) % ARRAY_SIZE(darwin_names);
++            if (darwin_names[at].count) {
++               shown = darwin_names[at];
++               next_name = at + 1;
++               break;
++            }
++         }
++         pthread_mutex_unlock(&darwin_names_lock);
++      }
++      if (shown.count)
++         n = snprintf(line.text, sizeof(line.text), "W n %.23s %u %lluK", shown.name, shown.count, (unsigned long long)(shown.bytes >> 10));
++      else
++         n = snprintf(line.text, sizeof(line.text), "W c%u/%lluM r%u/%lluM e%llu f%llu h%llu/%llu", retire->cache_count,
++                      (unsigned long long)(retire->cache_bytes >> 20), retire->count, (unsigned long long)(waiting >> 20),
++                      (unsigned long long)retire->cache_stats.evictions, (unsigned long long)retire->cache_stats.flushes,
++                      (unsigned long long)retire->cache_stats.hits, (unsigned long long)retire->cache_stats.lookups);
 +      line.bytes = n < 0 ? 0 : MIN2((unsigned)n, (unsigned)sizeof(line.text));
 +      (void)dw_call(NativeAdrenoMethodSetMetadata, &line, sizeof(line), NULL, 0);
 +   }
@@ -1127,6 +1203,7 @@ index 0000000..b03c6ee
 +   struct tu_bo *bo = tu_device_lookup_bo(dev, gem_handle);
 +   assert(bo && bo->gem_handle == 0);
 +
++   const char *alloc_name = name;
 +   name = tu_debug_bos_add(dev, size, name);
 +
 +   *bo = (struct tu_bo) {
@@ -1154,6 +1231,7 @@ index 0000000..b03c6ee
 +
 +   tu_dump_bo_init(dev, bo);
 +   TU_RMV(bo_allocate, dev, bo);
++   darwin_name_alloc(handle, alloc_name, alloc_size);
 +
 +   *out_bo = bo;
 +   if (flags & TU_BO_ALLOC_INTERNAL_RESOURCE) {
@@ -1329,6 +1407,7 @@ index 0000000..b03c6ee
 +   const struct darwin_retired_bo record = {bo->darwin_handle, bo->iova, bo->darwin_alloc_size ? bo->darwin_alloc_size : bo->size, bo->map,
 +                                            bo->darwin_token, 0, bo->darwin_alloc_size != 0, bo->darwin_read_only};
 +   memset(bo, 0, sizeof(*bo));
++   darwin_name_free(record.handle, record.size);
 +
 +   struct darwin_retire_state *retire = (struct darwin_retire_state *)dev->darwin_retire;
 +   pthread_mutex_lock(&retire->lock);
