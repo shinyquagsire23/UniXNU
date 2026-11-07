@@ -75,7 +75,11 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     '0029-latency-stage-selection.patch',
     # Spare image blocks have no byte limit (they age, go when a block cannot be made and on memory pressure), and the room keeper takes
     # a spare block before it makes a new one: the limit freed spares the render server made again within seconds, each a fresh wiring.
-    '0030-spare-image-blocks-give-room.patch']]
+    '0030-spare-image-blocks-give-room.patch',
+    # pdx203: QuartzCore's landscape framebuffer is a rotation-3 texture of the landscape extent over the portrait panel's IOSurface,
+    # whose rows are the portrait width; the macOS-measured pitch rule refused it (nil -> "Failed to allocate [2560 x 1096] BGRA
+    # framebuffer", the render server kept re-presenting its stale portrait framebuffers). On iOS the rule is skipped.
+    '0031-rotated-framebuffer-rows-on-ios.patch']]
 
 
 def git_tree(*steps):
