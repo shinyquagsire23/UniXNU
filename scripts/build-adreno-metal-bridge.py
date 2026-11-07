@@ -93,7 +93,11 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     '0035-timing-switches-hold-one.patch',
     # pdx203: the rotated copy back's kernel turns 32 x 32 blocks through shared memory, fetching along the frame image's rows
     # and storing along the plane's (bridge 0034's fetched down an image column, a cache line a texel: ~10 ms a copy back).
-    '0036-rotated-copy-back-tiled.patch']]
+    '0036-rotated-copy-back-tiled.patch',
+    # pdx203: a rotated texture's copy back is an indirect dispatch from a slot of its own; a later copy back of the same command buffer
+    # that stores the image over it, with nothing reading or writing the plane in between, zeroes its workgroups before submission
+    # (QuartzCore's landscape frame draws two full-frame passes, and only the second's copy back reaches the display).
+    '0037-rotated-copy-back-elided.patch']]
 
 
 def git_tree(*steps):
