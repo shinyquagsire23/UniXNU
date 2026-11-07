@@ -90,7 +90,10 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # turned position and stores the plane's words in order (the gather kernel's copy back cost ~15 ms of a landscape frame).
     '0034-rotated-copy-back-one-dispatch.patch',
     # pdx203 diagnostics: the timing switches are on only where their file holds 1 (the addon removes no file it installed).
-    '0035-timing-switches-hold-one.patch']]
+    '0035-timing-switches-hold-one.patch',
+    # pdx203: the rotated copy back's kernel turns 32 x 32 blocks through shared memory, fetching along the frame image's rows
+    # and storing along the plane's (bridge 0034's fetched down an image column, a cache line a texel: ~10 ms a copy back).
+    '0036-rotated-copy-back-tiled.patch']]
 
 
 def git_tree(*steps):
