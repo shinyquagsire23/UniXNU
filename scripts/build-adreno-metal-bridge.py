@@ -97,7 +97,10 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # pdx203: a rotated texture's copy back is an indirect dispatch from a slot of its own; a later copy back of the same command buffer
     # that stores the image over it, with nothing reading or writing the plane in between, zeroes its workgroups before submission
     # (QuartzCore's landscape frame draws two full-frame passes, and only the second's copy back reaches the display).
-    '0037-rotated-copy-back-elided.patch']]
+    '0037-rotated-copy-back-elided.patch',
+    # pdx203: no-copy memory of Metal's private option bit 24 goes through a read-only view on iOS too, so NativeAdreno maps it into
+    # the GPU read-only (the frontend's sampled-only IOSurface imports: no CPU cache invalidation when they are let go).
+    '0038-read-only-views-on-ios.patch']]
 
 
 def git_tree(*steps):
