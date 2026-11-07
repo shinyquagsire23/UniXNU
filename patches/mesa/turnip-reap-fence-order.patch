@@ -1,0 +1,46 @@
+turnip(darwin): retire swept BOs by fence order
+
+One ring completes its fences in order: within a sweep the newest fence seen complete covers every older one and the oldest
+seen pending every newer one, so the sweep polls the kernel for a few fences instead of one per distinct fence.
+
+--- a/src/freedreno/vulkan/tu_knl_darwin.cc
++++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+@@ -830,7 +830,11 @@
+    if (retire->failure != VK_SUCCESS)
+       return retire->failure;
+    /* Cache only within this sweep. Persisting a bare 32-bit fence across sweeps
+-    * could mistake a later wrapped value for an old observed completion. */
++    * could mistake a later wrapped value for an old observed completion.
++    * pdx203: one ring, so fences complete in order. Within the sweep the newest fence seen complete covers every older one and the
++    * oldest seen pending every newer one (serial-number comparison: every fence here is within 2^31 of the others), so a sweep asks
++    * the kernel about a few fences, not one per distinct fence (Dusklight's menu: ~7000 WaitFence calls a second, most of them
++    * these zero-timeout polls, on the main thread). */
+    uint32_t completed_fence = 0, pending_fence = 0;
+    bool have_completed_fence = false, have_pending_fence = false;
+    /* Every entry is looked at, not only the oldest: one BO behind a fence still in flight must not hold back the completed ones queued
+@@ -841,19 +845,21 @@
+       struct darwin_retired_bo *bo = &retire->entries[(retire->head + i) % retire->capacity];
+       bool ready = true;
+       if (bo->fence) {
+-         if (have_pending_fence && bo->fence == pending_fence) {
++         if (have_pending_fence && (int32_t)(bo->fence - pending_fence) >= 0) {
+             ready = false;
+-         } else if (!have_completed_fence || bo->fence != completed_fence) {
++         } else if (!have_completed_fence || (int32_t)(bo->fence - completed_fence) > 0) {
+             VkResult result = dw_wait_fence_raw(dev, bo->fence, 0);
+             if (result == VK_TIMEOUT) {
+                ready = false;
++               if (!have_pending_fence || (int32_t)(bo->fence - pending_fence) < 0)
++                  pending_fence = bo->fence;
+                have_pending_fence = true;
+-               pending_fence = bo->fence;
+             } else if (result != VK_SUCCESS) {
+                return retire->failure = result;
+             } else {
++               if (!have_completed_fence || (int32_t)(bo->fence - completed_fence) > 0)
++                  completed_fence = bo->fence;
+                have_completed_fence = true;
+-               completed_fence = bo->fence;
+             }
+          }
+       }
