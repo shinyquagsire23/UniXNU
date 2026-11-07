@@ -79,7 +79,18 @@ PATCHES = [ROOT / 'drivers/AdrenoMetal/bridge/patches' / name for name in [
     # pdx203: QuartzCore's landscape framebuffer is a rotation-3 texture of the landscape extent over the portrait panel's IOSurface,
     # whose rows are the portrait width; the macOS-measured pitch rule refused it (nil -> "Failed to allocate [2560 x 1096] BGRA
     # framebuffer", the render server kept re-presenting its stale portrait framebuffers). On iOS the rule is skipped.
-    '0031-rotated-framebuffer-rows-on-ios.patch']]
+    '0031-rotated-framebuffer-rows-on-ios.patch',
+    # pdx203: a rotated (framebuffer-only) texture's image carries across command buffers instead of a copy in and turn every
+    # frame, and its copy back is one copy of the staged span instead of one per row: landscape frames cost ~30 ms of GPU.
+    '0032-rotated-framebuffer-carry-and-one-copy-back.patch',
+    # pdx203 diagnostics: the rotated turns' counters (the frontend's PDX203ROT row) and two timing switches
+    # (/private/var/ngpu/debug/rot-skip-in, rot-skip-back; off unless the addon ships them).
+    '0033-rotated-turn-counters-and-timing-switches.patch',
+    # pdx203: a rotated texture's copy back as one dispatch that fetches its frame image's R32_UINT view at each stored texel's
+    # turned position and stores the plane's words in order (the gather kernel's copy back cost ~15 ms of a landscape frame).
+    '0034-rotated-copy-back-one-dispatch.patch',
+    # pdx203 diagnostics: the timing switches are on only where their file holds 1 (the addon removes no file it installed).
+    '0035-timing-switches-hold-one.patch']]
 
 
 def git_tree(*steps):
